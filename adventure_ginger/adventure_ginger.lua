@@ -126,9 +126,13 @@ local facts = {
     {id = "alleys_b", observe = function(_, _, event)
         return event.region_index == content.alleys_b.region_index
     end},
+    -- Publishing the pedestal as used echoes one report with no owner, 0.2 s later (playtest 2:
+    -- has_owner=false). Only an owned report counts as the player's use; the real hold surfaced
+    -- only as the ghost link starting, which revive_scene also accepts.
     {id = "pedestal.used", observe = function(context, state, event)
         return graph:started(context, state, "revive")
             and lib.is_slot(context, event, content.pedestal)
+            and event.has_owner == true
     end},
     {id = "revival.started", observe = function(context, state, event)
         return graph:started(context, state, "revive")
