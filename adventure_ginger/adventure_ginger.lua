@@ -8,6 +8,10 @@ local content = require("adventure_ginger.content")(mission)
 local WIPED = "deadly_trial.wiped"
 local WIPE_REQUEST = "deadly_trial.wipe_request"
 local RESPAWNING = "deadly_trial.respawning"
+-- The revival scene's last line (row 10) ends about 11.2 s after the ghost link closes
+-- (48.675 s + 250 ms tail against the link's ~37.75 s).
+local TAIL_TIMER = "deadly_trial.tail"
+local TAIL_MS = 11200
 
 local function population(encounter)
     local squads = {}
@@ -135,6 +139,9 @@ local facts = {
             and lib.is_slot(context, event, content.ghost_link)
             and event.active == false
     end},
+    {id = "revival.tail", observe = function(_, _, event)
+        return event.timer_name == TAIL_TIMER
+    end},
 }
 for _, name in ipairs({
     "square.entered", "pikes.reached", "outpost.entered", "tower.inside",
@@ -190,12 +197,11 @@ graph = flow.new{key = "deadly_trial", facts = facts, steps = {
     {id = "square_fight", after = {"square"}, run = function(context)
         show(context, {directive = content.goals.coordinates.directive})
     end, await = cleared_or(content.encounters.square, past_square)},
-    -- After the square the marker moves on toward the followers. The goal text stays, so the
-    -- directive keeps its hash and nothing is highlighted.
+    -- After the square the followers' Pikes appear and the goal asks the player to take one
+    -- ("Commandeer a Fallen Pike"). The Pikes stay out of the seed until now.
     {id = "rendezvous_marker", after = {"square_fight"}, run = function(context)
-        show(context, {
-            directive = content.goals.coordinates.directive, navpoint = content.goals.path.navpoint,
-        })
+        context:activate_objects{slots = content.pikes.square, active = true}
+        show(context, content.goals.pike)
     end},
     -- The pike trigger just past the square starts the next goal; its line waits in the filter
     -- volume beyond it.
@@ -224,9 +230,11 @@ graph = flow.new{key = "deadly_trial", facts = facts, steps = {
         context:slot(content.barrier):transition{transition = context.sdk.device_transitions.open}
         show(context, content.goals.temple)
         context:activate_objects{slots = content.pikes.roadblock, active = true}
-    end, await = function(context)
+    -- The barrier's applied report ends the wait. Reaching the trial past it does too, so a lost
+    -- device report cannot stall every later step.
+    end, await = flow.any(function(context)
         return context:slot(content.barrier):applied{channel = context.sdk.device_channels.position}
-    end},
+    end, trial)},
     -- The tunnel is open once the barrier is down; the line's authored pause is three seconds.
     {id = "tunnel_line", after = {"barrier"}, run = function(context)
         say(context, content.dialogue.survival)
@@ -316,16 +324,19 @@ graph = flow.new{key = "deadly_trial", facts = facts, steps = {
         show(context, content.goals.revive, content.dialogue.bodies)
         context:slot(content.pedestal):set_interactable_object{used = true}
     end},
-    {id = "revive_hint", after = {"revive"}, run = function(context)
-        say(context, content.dialogue.hope)
-    end},
+    -- The "hope" hint (row 8) is not sent: in the same tick as row 7 it overlapped the revival
+    -- scene's own lines, and the accepted reference never queues it either.
     -- Using the device starts the revival; either report ends the wait.
-    {id = "revive_scene", after = {"revive_hint"},
+    {id = "revive_scene", after = {"revive"},
         await = flow.any(flow.fact("pedestal.used"), flow.fact("revival.started"))},
     {id = "revival", after = {"revive_scene"}, await = flow.fact("revival.started")},
     {id = "revival_done", after = {"revival"}, await = flow.fact("revival.finished")},
+    -- The Ikora/Sagira exchange runs on after the link closes; the banner waits for its last line.
+    {id = "revival_tail", after = {"revival_done"}, run = function(context)
+        context:start_timer(TAIL_TIMER, TAIL_MS)
+    end, await = flow.fact("revival.tail")},
     -- The finished mission shows no goal and no map marker.
-    {id = "finish", after = {"revival_done"}, run = function(context)
+    {id = "finish", after = {"revival_tail"}, run = function(context)
         context:slot(content.directive_sensor):clear_directives()
         context:complete_mission{}
     end},
@@ -433,6 +444,7 @@ return {
     on_event_device_state = handle,
     on_event_ghost_link_state = handle,
     on_event_trigger_entered = handle,
+    on_event_timer_elapsed = handle,
     on_event_fireteam_state = fireteam_state,
     on_event_effect_result = effect_result,
 }

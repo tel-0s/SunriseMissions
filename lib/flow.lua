@@ -12,6 +12,13 @@ local function name(value)
     return value
 end
 
+-- Progress lines for sunrise.log. Builds without context:log return nil for it, so this is a no-op
+-- there. The log keeps 16 lines per callback, so each step transition writes one line.
+local function trace(context, flow_key, text)
+    local log = context.log
+    if log ~= nil then log(context, flow_key .. ": " .. text) end
+end
+
 function flow.fact(id)
     return {fact = name(id)}
 end
@@ -135,7 +142,7 @@ function flow.new(definition)
         local id = name(item.id)
         assert(not by_id[id], "duplicate flow fact: " .. id)
         assert(type(item.observe) == "function", "flow fact needs an observer")
-        local fact = {key = state_key(prefix, "fact", id), observe = item.observe}
+        local fact = {id = id, key = state_key(prefix, "fact", id), observe = item.observe}
         by_id[id], facts[index] = fact, fact
     end
     local steps = ordered_steps(definition.steps, prefix, by_id)
@@ -197,15 +204,18 @@ function flow.new(definition)
                     ready = step.start(context, state) == true
                 end
                 if ready then
-                    if progress ~= ENTERED then
+                    local entering = progress ~= ENTERED
+                    if entering then
                         if step.run then step.run(context, state) end
                         context:set_variable(step.key, ENTERED)
                     end
                     if step.ready(context, state) == true then
                         context:set_variable(step.key, FINISHED)
                         if step.checkpoint then context:set_variable(checkpoint_key, step.id) end
+                        trace(context, definition.key, "step " .. step.id .. (entering and " ran" or " done"))
                     else
                         complete = false
+                        if entering then trace(context, definition.key, "step " .. step.id .. " waiting") end
                     end
                 else
                     complete = false
@@ -223,6 +233,7 @@ function flow.new(definition)
         for _, fact in ipairs(facts) do
             if state:variable(fact.key) ~= true and fact.observe(context, state, event) == true then
                 context:set_variable(fact.key, true)
+                trace(context, definition.key, "fact " .. fact.id)
             end
         end
         return self:advance(context, state)

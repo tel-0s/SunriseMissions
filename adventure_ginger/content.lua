@@ -385,6 +385,13 @@ return function(mission)
                 directive = lib.one(mission.Directive.RENDEZVOUS_WITH_THE_FOLLOWERS_OF_OSIRIS_TO_REVIVE_SAGIRA_EC217779, "Directive"),
                 navpoint = lib.one(mission.Slot.GINGER_ALLEYS_A_GOTO_NAV_POINT, "Slot"),
             },
+            -- "Commandeer a Fallen Pike": shown when the square is clear and its Pikes appear. The
+            -- steal-pikes object owns both the marker and the trigger that ends this step.
+            pike = {
+                directive = lib.one(mission.Directive.RENDEZVOUS_WITH_THE_FOLLOWERS_OF_OSIRIS_TO_REVIVE_SAGIRA_DA95AE49, "Directive"),
+                navpoint = lib.one(mission.Slot.GINGER_ALLEYS_A_STEAL_PIKES_NAV_POINT, "Slot"),
+                waypoint = lib.one(mission.Slot.WAYPOINT_VOLUME, "Slot"),
+            },
             path = {
                 directive = lib.one(mission.Directive.RENDEZVOUS_WITH_THE_FOLLOWERS_OF_OSIRIS_TO_REVIVE_SAGIRA, "Directive"),
                 navpoint = lib.one(mission.Slot.GINGER_ALLEYS_A_GOTO_TANK_NAV_POINT, "Slot"),
