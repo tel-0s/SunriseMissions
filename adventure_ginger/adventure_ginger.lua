@@ -12,6 +12,9 @@ local RESPAWNING = "deadly_trial.respawning"
 -- (48.675 s + 250 ms tail against the link's ~37.75 s).
 local TAIL_TIMER = "deadly_trial.tail"
 local TAIL_MS = 11200
+-- Directive state for a finished goal. The API allows 0 (enter), 1 and 2; 1 is assumed to be
+-- "complete" (a check mark) until a playtest confirms it. If the HUD shows a failure, try 2.
+local GOAL_DONE_STATE = 1
 
 local function population(encounter)
     local squads = {}
@@ -70,6 +73,7 @@ end
 local function show(context, goal, line)
     context:slot(content.directive_sensor):set_directive{
         directive = goal.directive,
+        state = goal.state,
         navpoint = goal.navpoint ~= nil and context:slot(goal.navpoint) or nil,
         waypoint = goal.waypoint ~= nil and context:slot(goal.waypoint) or nil,
     }
@@ -332,7 +336,9 @@ graph = flow.new{key = "deadly_trial", facts = facts, steps = {
     {id = "revival", after = {"revive_scene"}, await = flow.fact("revival.started")},
     {id = "revival_done", after = {"revival"}, await = flow.fact("revival.finished")},
     -- The Ikora/Sagira exchange runs on after the link closes; the banner waits for its last line.
+    -- Sagira is back: the goal checks off (no marker) while the exchange plays out.
     {id = "revival_tail", after = {"revival_done"}, run = function(context)
+        show(context, {directive = content.goals.revive.directive, state = GOAL_DONE_STATE})
         context:start_timer(TAIL_TIMER, TAIL_MS)
     end, await = flow.fact("revival.tail")},
     -- The finished mission shows no goal and no map marker.
@@ -352,6 +358,22 @@ end
 local function handle(context, state, event)
     if state:variable(RESPAWNING) == true then return end
     graph:handle(context, state, event)
+end
+
+-- Diagnostic: the pedestal reported "used" 0.2 s after the script published it as used, before
+-- any real hold. Log every pedestal report so a playtest shows which field separates the echo
+-- from the player's interaction.
+local function object_interacted(context, state, event)
+    local log = context.log
+    if log ~= nil and lib.is_slot(context, event, content.pedestal) then
+        log(context, "deadly_trial: pedestal present=" .. tostring(event.present)
+            .. " alive=" .. tostring(event.alive)
+            .. " open=" .. tostring(event.interaction_open)
+            .. " owner_known=" .. tostring(event.owner_known)
+            .. " has_owner=" .. tostring(event.has_owner)
+            .. " owner=" .. tostring(event.owner_key))
+    end
+    handle(context, state, event)
 end
 
 local function player_trigger(context, state, event)
@@ -440,7 +462,7 @@ return {
     on_event_player_trigger = player_trigger,
     on_event_squad_state = handle,
     on_event_actor_path_state = handle,
-    on_event_object_interacted = handle,
+    on_event_object_interacted = object_interacted,
     on_event_device_state = handle,
     on_event_ghost_link_state = handle,
     on_event_trigger_entered = handle,
