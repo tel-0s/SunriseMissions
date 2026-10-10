@@ -407,11 +407,15 @@ function campaign.new(content)
             populate(content, context, encounter)
         end}
     end
-    -- The finished mission shows no goal and no map marker.
+    -- The finished mission shows no goal and no map marker, then returns the fireteam to orbit.
+    -- content.orbit_return_ms changes the delay; false keeps the players in the world.
     chain[#chain + 1] = {id = "done", after = {previous}, run = function(context)
         if content.finish ~= nil then content.finish(context) end
         context:slot(content.directive_sensor):clear_directives()
         context:complete_mission{}
+        if content.orbit_return_ms ~= false then
+            lib.schedule_orbit_return(context, content.orbit_return_ms)
+        end
     end}
 
     graph = flow.new{key = content.key, facts = facts, steps = chain}
@@ -569,6 +573,10 @@ function campaign.new(content)
         on_event_object_interacted = handle,
         on_event_ghost_link_state = handle,
         on_event_object_state = handle,
+        -- The only campaign timer is the return to orbit scheduled by the finish step.
+        on_event_timer_elapsed = function(context, _, event)
+            lib.orbit_return_elapsed(context, event)
+        end,
     }
 end
 

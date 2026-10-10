@@ -84,14 +84,16 @@ function lib.play_idles(context, idles)
     end
 end
 
--- Return to orbit after the completion countdown. complete_mission publishes lifetime state 6:
--- the banner and countdown. The client sends nothing when the countdown ends; it waits for the
--- host. Lifetime state 8 is documented as "client returns to orbit" but is not yet confirmed in
--- game. Call schedule_orbit_return right after complete_mission, and pass every
--- on_event_timer_elapsed through orbit_return_elapsed first.
+-- Return to orbit after a completed mission. complete_mission publishes lifetime state 6, the
+-- banner. The client then waits for the host and sends nothing. Lifetime state 8 makes it run its
+-- native leave-to-orbit path (confirmed in A Deadly Trial playtest 2: types 22/15/26/33 followed
+-- 0.1 s after the push). The banner's countdown reads 0 because the type-18 activity timer's clock
+-- window is never written, so the delay is ours to choose.
+-- Call schedule_orbit_return right after complete_mission, and pass every on_event_timer_elapsed
+-- through orbit_return_elapsed first. lib.campaign does both.
 lib.ORBIT_RETURN_TIMER = "lib.orbit_return"
 lib.ORBIT_RETURN_STATE = 8
-lib.ORBIT_RETURN_MS = 30000
+lib.ORBIT_RETURN_MS = 10000
 
 function lib.schedule_orbit_return(context, milliseconds)
     context:start_timer(lib.ORBIT_RETURN_TIMER, milliseconds or lib.ORBIT_RETURN_MS)
