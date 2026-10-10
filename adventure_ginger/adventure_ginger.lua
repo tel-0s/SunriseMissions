@@ -345,6 +345,7 @@ graph = flow.new{key = "deadly_trial", facts = facts, steps = {
     {id = "finish", after = {"revival_tail"}, run = function(context)
         context:slot(content.directive_sensor):clear_directives()
         context:complete_mission{}
+        lib.schedule_orbit_return(context)
     end},
 }}
 
@@ -466,7 +467,10 @@ return {
     on_event_device_state = handle,
     on_event_ghost_link_state = handle,
     on_event_trigger_entered = handle,
-    on_event_timer_elapsed = handle,
+    on_event_timer_elapsed = function(context, state, event)
+        if lib.orbit_return_elapsed(context, event) then return end
+        handle(context, state, event)
+    end,
     on_event_fireteam_state = fireteam_state,
     on_event_effect_result = effect_result,
 }

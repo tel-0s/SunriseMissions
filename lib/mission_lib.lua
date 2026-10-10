@@ -84,4 +84,26 @@ function lib.play_idles(context, idles)
     end
 end
 
+-- Return to orbit after the completion countdown. complete_mission publishes lifetime state 6:
+-- the banner and countdown. The client sends nothing when the countdown ends; it waits for the
+-- host. Lifetime state 8 is documented as "client returns to orbit" but is not yet confirmed in
+-- game. Call schedule_orbit_return right after complete_mission, and pass every
+-- on_event_timer_elapsed through orbit_return_elapsed first.
+lib.ORBIT_RETURN_TIMER = "lib.orbit_return"
+lib.ORBIT_RETURN_STATE = 8
+lib.ORBIT_RETURN_MS = 30000
+
+function lib.schedule_orbit_return(context, milliseconds)
+    context:start_timer(lib.ORBIT_RETURN_TIMER, milliseconds or lib.ORBIT_RETURN_MS)
+end
+
+-- @return true when the event was the orbit timer and the return was requested.
+function lib.orbit_return_elapsed(context, event)
+    if event.timer_name ~= lib.ORBIT_RETURN_TIMER then return false end
+    local log = context.log
+    if log ~= nil then log(context, "orbit return: lifetime state " .. lib.ORBIT_RETURN_STATE) end
+    context.lifetime:set{state = context.sdk.lifetime_states:at(lib.ORBIT_RETURN_STATE)}
+    return true
+end
+
 return lib
