@@ -85,18 +85,33 @@ local function spawn(encounter)
     end
 end
 
-local function cleared(squads)
-    return function(context) return context:cohort{squads = squads}.cleared end
+-- An encounter is down when its loose squads were fully spawned and are dead, and none of its
+-- scene squads is known to be alive. A scene squad that never reported (its scene did not spawn it)
+-- does not block: the cohort knows nothing about it, so its alive count is nil.
+local function scene_squads_down(context, squads)
+    for _, squad in ipairs(squads) do
+        local alive = context:cohort{squads = {squad}}.alive_count
+        if alive ~= nil and alive > 0 then return false end
+    end
+    return true
 end
 
--- A clear counts after it has held for SETTLE_MS. The timer re-arms itself while the cohort is not
--- cleared, so a squad that comes back resets the wait instead of passing it.
+local function down(encounter)
+    return function(context)
+        return context:cohort{squads = encounter.loose}.cleared
+            and scene_squads_down(context, encounter.scene)
+    end
+end
+
+-- A clear counts after it has held for SETTLE_MS. The timer re-arms itself while the encounter is
+-- not down, so a squad that comes back resets the wait instead of passing it.
 local function settle_timer(name) return "hc.settle." .. name end
-local function settled_fact(name, squads)
+local function settled_fact(name, encounter)
     local timer = settle_timer(name)
+    local is_down = down(encounter)
     return {id = "settled." .. name, observe = function(context, _, event)
         if event.timer_name ~= timer then return false end
-        if context:cohort{squads = squads}.cleared then return true end
+        if is_down(context) then return true end
         context:start_timer(timer, SETTLE_MS)
         return false
     end}
@@ -112,6 +127,14 @@ local function hero_timer(name) return "hc.scene." .. name .. ".entry" end
 
 local function activate_hero(context, name)
     local hero = content.heroes[name]
+    -- Combat objectives first, so the cast fights once the scene lets go of it.
+    for _, entry in ipairs(hero.objectives or {}) do
+        context:slot(entry.source):assign_combat_objective{objective = context:slot(entry.objective)}
+    end
+    -- Squads without an actor cell are left out of the cast; reserved, the client binds them.
+    for _, squad in ipairs(hero.reserve or {}) do
+        context:squad(squad):place{mode = context.sdk.squad_modes.reserve}
+    end
     for _, cell in ipairs(hero.bind or {}) do context:slot(cell):bind_combatant_to_squad() end
     local request = context:scene(hero.scene):activate{spawn = true}
     context:set_variable(hero_request_key(name), request.value)
@@ -179,7 +202,7 @@ graph = flow.new{key = "homecoming", facts = facts, steps = {
         talk:say(context, state, content.lines.breach)
     end},
     -- U4: "Cabal" purpose line once the first contact is down (no fixed delay).
-    {id = "first_contact_down", after = {"breach_entry"}, await = cleared(content.first_contact)},
+    {id = "first_contact_down", after = {"breach_entry"}, await = down(content.first_contact)},
     {id = "first_contact_settle", after = {"first_contact_down"}, run = function(context)
         context:start_timer(settle_timer("first_contact"), SETTLE_MS)
     end, await = flow.fact("settled.first_contact")},
@@ -213,7 +236,7 @@ graph = flow.new{key = "homecoming", facts = facts, steps = {
 
     -- U10: the approach is clear once every wave so far is down and has stayed down.
     {id = "approach_down", after = {"breach_entry", "centurion_entry", "centurion_rush_spawn", "drop_pod_spawn"},
-        await = cleared(content.approach)},
+        await = down(content.approach)},
     {id = "approach_settle", after = {"approach_down"}, run = function(context)
         context:start_timer(settle_timer("approach"), SETTLE_MS)
     end, await = flow.fact("settled.approach")},

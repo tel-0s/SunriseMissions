@@ -121,26 +121,37 @@ return function(mission)
     }
     c.hero_moment = scene("SC_HERO_MOMENT_UNDERWATCH")                  -- 64
 
-    -- Hero scenes. Entry events are the scenes' own keys. Scene actors come only from the scene:
-    -- placing a source a scene owns made a duplicate Centurion in Dawn (6, 7, 20, 24, 27, 28, 30, 32,
-    -- 50, 15).
+    -- Hero scenes. Entry events are the scenes' own keys.
+    -- activate{spawn=true} casts only squads that have an actor cell (a type-2 slot) in the scene's
+    -- state; it counts the rest as omitted ("ev=scene_cast result=partial") and leaves them to the
+    -- client, which binds only squads that exist. Playtest 1 lost the breach Cabal that way. So each
+    -- scene's cell-less squads are reserved first (the v40 script reserved every cast squad), and
+    -- cells are bound. Never place a scene's squads with reinforce/replace: Dawn got a duplicate
+    -- Centurion that way.
     c.heroes = {
         breach = {
             scene = scene("SCENE_CABAL_FIRST_CONTACT"), slot = slot("SCENE_CABAL_FIRST_CONTACT"), -- 10
             entry = 0xAE7CC69C,
+            reserve = squads("SQUAD_FIRST_CONTACT_CABAL", "SQ_FRAME_DIE"),                      -- 6, 7
+            objectives = {{source = slot("SQUAD_FIRST_CONTACT_CABAL"), objective = slot("OBJ_CABAL_FIRST_CONTACT")}},
         },
         centurion = {
             scene = scene("SC_CENTURION_INTRO"), slot = slot("SC_CENTURION_INTRO"), -- 18
-            entry = 0x6F51AC66, bind = slots("SQ_CENTURION_INTRO_CELL_1"), -- 21
+            entry = 0x6F51AC66,
+            bind = slots("SQ_CENTURION_INTRO_CELL_1"),                                          -- 21
+            reserve = squads("SQ_FRAME"),                                                       -- 24
+            objectives = {{source = slot("SQ_CENTURION_INTRO"), objective = slot("OBJ_CENTURION_INTRO")}},
         },
         cayde = {
             scene = scene("SCENE_CAYDE_GOLDEN_GUN"), slot = slot("SCENE_CAYDE_GOLDEN_GUN"), -- 17
             entry = 0x6F51AC66,
             bind = slots("SQ_LEGIONARYA_CELL_1", "SQ_LEGIONARYB_CELL_1", "SQ_LEGIONARYC_CELL_1"), -- 29, 31, 33
+            reserve = squads("SQ_CAYDE", "SQUAD_INVISIBLE_SHOOT_TARGET_1"),                     -- 27, 50
         },
         shaxx = {
             scene = scene("SCENE_SHAXX"), slot = slot("SCENE_SHAXX"),    -- 14
             entry = 0x6F51AC66,
+            reserve = squads("SQ_SHAXX"),                                -- 15
         },
     }
     c.hero_order = {"breach", "centurion", "cayde", "shaxx"}
@@ -163,12 +174,18 @@ return function(mission)
                 objective = slot("OBJ_CENTURION_INTRO")},              -- 23
         },
     }
-    -- Clears: Dawn holds each clear for 3 s before it counts.
-    c.first_contact = squads("SQUAD_FIRST_CONTACT_CABAL", "SQUAD_FIRST_CONTACT_CABAL_BACKUP_A",
-        "SQUAD_FIRST_CONTACT_CABAL_BACKUP_B")                           -- 6, 8, 9
-    c.approach = squads("SQUAD_FIRST_CONTACT_CABAL", "SQUAD_FIRST_CONTACT_CABAL_BACKUP_A",
-        "SQUAD_FIRST_CONTACT_CABAL_BACKUP_B", "SQ_CENTURION_INTRO", "SQ_CENTURION_INTRO_RUSH",
-        "SQ_CENTURION_INTRO_BACKUP")                                    -- 6, 8, 9, 20, 22, 23
+    -- Clears: Dawn holds each clear for 3 s before it counts. Loose squads must be fully spawned and
+    -- dead; a scene's squad blocks only while it is known to be alive, so a scene that failed to
+    -- spawn its cast cannot hold the mission.
+    c.first_contact = {
+        loose = squads("SQUAD_FIRST_CONTACT_CABAL_BACKUP_A", "SQUAD_FIRST_CONTACT_CABAL_BACKUP_B"), -- 8, 9
+        scene = squads("SQUAD_FIRST_CONTACT_CABAL"),                                         -- 6
+    }
+    c.approach = {
+        loose = squads("SQUAD_FIRST_CONTACT_CABAL_BACKUP_A", "SQUAD_FIRST_CONTACT_CABAL_BACKUP_B",
+            "SQ_CENTURION_INTRO_RUSH", "SQ_CENTURION_INTRO_BACKUP"),                         -- 8, 9, 22, 23
+        scene = squads("SQUAD_FIRST_CONTACT_CABAL", "SQ_CENTURION_INTRO"),                   -- 6, 20
+    }
 
     -- Dialogue rows (CUE_n). Row 4 is dropped (Dawn); row 6 waits for the first-contact clear.
     c.lines = {landing = 1, breach = 5, first_contact = 6, civ_run = 7}
