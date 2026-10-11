@@ -687,11 +687,15 @@ local facts_d = {
         end
         return state:variable(ROCKET_SEEN) == true
     end},
-    -- The revive: an owned report, the interaction closing after it was open, the interactable or
-    -- the Ghost gone, or the fallback timer (interaction holds have not reported in playtests).
+    -- The revive: the prompt's accepted use (its Sense interaction latch, raised as
+    -- object_interacted), an owned report, the interaction closing after it was open, the
+    -- interactable or the Ghost gone, or the fallback timer. The prompt is published unused, so
+    -- the echo of a "used" publish cannot come before the player's hold.
     {id = "revive.used", observe = function(context, state, event)
         if lib.is_slot(context, event, plaza.dead_interact) then
-            if event.has_owner == true or event.present == false then return true end
+            if event.kind == "objectInteracted" or event.has_owner == true or event.present == false then
+                return true
+            end
             if event.interaction_open == true then context:set_variable(REVIVE_OPEN, true) end
             return event.interaction_open == false and state:variable(REVIVE_OPEN) == true
         end
@@ -886,6 +890,16 @@ local function advance(context, state)
     for _, g in ipairs(graphs) do g:advance(context, state) end
 end
 
+-- Every accepted interaction is logged, so a playtest shows whether a hold's use reaches the script
+-- (the armory rack and the revive have only ever finished through triggers and fallbacks).
+local function object_interacted(context, state, event)
+    if event.slot ~= nil then
+        trace(context, "interaction used: " .. tostring(event.slot.name) .. " generation "
+            .. tostring(event.generation) .. " owner " .. tostring(event.has_owner))
+    end
+    handle(context, state, event)
+end
+
 local function player_trigger(context, state, event)
     if event.slot ~= nil and state:variable(armed_key(event.slot)) == true then
         context:clear_variable(armed_key(event.slot))
@@ -969,6 +983,6 @@ return {
     on_event_squad_state = handle,
     on_event_trigger_entered = handle,
     on_event_object_state = handle,
-    on_event_object_interacted = handle,
+    on_event_object_interacted = object_interacted,
     on_event_device_state = handle,
 }
