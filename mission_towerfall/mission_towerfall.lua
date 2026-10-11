@@ -289,6 +289,12 @@ local function arm_all(context, triggers, order)
     for _, name in ipairs(order) do arm(context, triggers[name]) end
 end
 
+-- Re-arms a region's triggers once its object groups are published (see REARM below).
+local REARM_MS = 2000
+local function rearm_later(context, id)
+    context:start_timer("hc.rearm." .. id, REARM_MS)
+end
+
 local function timer_fact(id, timer)
     return {id = id, observe = function(_, _, event) return event.timer_name == timer end}
 end
@@ -418,6 +424,7 @@ local graph_b = flow.new{key = "homecoming.b", facts = facts_b, steps = {
         close(context, military.gate_start)
         close(context, military.gate_hangar)
         arm_all(context, military.triggers, military.trigger_order)
+        rearm_later(context, "military")
         for _, member in ipairs(military.checkpoint) do place_lanes(context, member, military.objective) end
         for _, name in ipairs(military.scene_order) do activate_hero(context, name) end
         trace(context, "military entered")
@@ -572,6 +579,7 @@ local graph_c = flow.new{key = "homecoming.c", facts = facts_c, steps = {
         music(context, state, content.music.plaza)
         set_active(context, plaza.off_on_arrival, false)
         arm_all(context, plaza.triggers, plaza.trigger_order)
+        rearm_later(context, "plaza")
         set_active(context, plaza.skybox, true)
         trace(context, "plaza entered")
     end},
@@ -839,6 +847,33 @@ end
 
 local graphs = {graph, graph_b, graph_c, graph_d}
 
+-- Triggers armed on a region change can race the region's object groups, which the server
+-- publishes over the next few hundred milliseconds: a group published after the arm resets it.
+-- The plaza lost all four triggers that way in playtest 1. So each region's triggers are armed again
+-- shortly after entry, and again on a script reload once the region is entered. A trigger that
+-- already reported just reports again; its fact is already latched.
+local REARM = {
+    {id = "military", graph = graph_b, fact = "military", triggers = military.triggers, order = military.trigger_order},
+    {id = "plaza", graph = graph_c, fact = "plaza", triggers = plaza.triggers, order = plaza.trigger_order},
+}
+
+local function rearm_elapsed(context, event)
+    for _, set in ipairs(REARM) do
+        if event.timer_name == "hc.rearm." .. set.id then
+            arm_all(context, set.triggers, set.order)
+            trace(context, set.id .. " triggers armed again")
+            return true
+        end
+    end
+    return false
+end
+
+local function rearm_entered(context, state)
+    for _, set in ipairs(REARM) do
+        if set.graph:fact(context, state, set.fact) then arm_all(context, set.triggers, set.order) end
+    end
+end
+
 local function handle(context, state, event)
     for _, g in ipairs(graphs) do g:handle(context, state, event) end
 end
@@ -901,6 +936,7 @@ return {
     on_load = function(context, state)
         end_intro(context, state)
         talk:resume(context, state)
+        rearm_entered(context, state)
         advance(context, state)
     end,
     on_event_region_changed = function(context, state, event)
@@ -922,6 +958,7 @@ return {
         -- A finished line can release a step that waits on dialogue (the plaza's ship, its Ward).
         if talk:handle_timer(context, state, event) then advance(context, state) return end
         if lib.orbit_return_elapsed(context, event) then return end
+        if rearm_elapsed(context, event) then return end
         handle(context, state, event)
     end,
     on_event_scene_finished = scene_finished,
