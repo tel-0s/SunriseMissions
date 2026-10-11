@@ -389,11 +389,19 @@ local graph_b = flow.new{key = "homecoming.b", facts = facts_b, steps = {
     {id = "post_gun_said", after = {"post_gun_line"}, run = function(context, state)
         talk:say(context, state, content.lines.post_gun)
     end},
-    -- A3: the rifle. No weapon grant exists in Sunrise, so an owned report from the rack or the
-    -- weapon-complete trigger ends the step; the player keeps their loadout.
+    -- A3: the rifle. An owned report from the rack, or the weapon-complete trigger, ends the step.
+    -- The rewards go through context:grant_reward (the world-reward queue); builds without it skip
+    -- the grant and the player keeps their loadout.
     {id = "weapon", after = {"armory_open"}, await = flow.any(flow.fact("rack.used"), pt("weapon_complete"))},
     {id = "weapon_taken", after = {"weapon"}, run = function(context, state)
         context:slot(armory.rack):set_interactable_object{active = false, used = true}
+        local grant = context.grant_reward
+        if grant ~= nil then
+            for _, item in ipairs(armory.rewards) do grant(context, {item = item}) end
+            trace(context, "armory weapons granted")
+        else
+            trace(context, "no context:grant_reward in this build; weapons not granted")
+        end
         talk:say(context, state, content.lines.weapon)
         show(context, armory.goal)
     end},

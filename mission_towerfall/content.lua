@@ -202,6 +202,9 @@ return function(mission)
     c.armory = {
         gun_door = slot("D_GUN_DOOR"),                                  -- 117
         rack = slot("AUTO_RIFLE_INTERACTABLE"),                         -- 103
+        -- The rack's rewards, in Dawn's order: the sidearm first, so the Origin Story auto rifle is
+        -- the last one picked up.
+        rewards = {0x654C35C4, 0xEFD9F21F},
         goal = {directive = directive("FIND_ZAVALA_432D2C96"),         -- objective 2
             navpoint = slot("AP_GOTO_MILITARY_80B5168C"), waypoint = slot("TV_GOTO_MILITARY")},
         triggers = {
