@@ -1,391 +1,351 @@
--- Homecoming. Red War campaign draft; not tested in game.
--- Steps follow the step objects and their lines: Shaxx sends the player through the armory and
--- the hangar to the plaza, Zavala sends them after Ikora, and Amanda picks them up past the
--- boulevard.
+-- Homecoming (Red War). A clean script on lib.flow, written section by section from Dawn's native
+-- Homecoming (beat order and fixes) and the "Homecoming v40" Sunrise script (Dawn PR #8).
+--
+-- Done: intro (HRO fly-in) and Underwatch, up to Shaxx sending the player to gear up.
+-- Next: armory, military/hangar, plaza, boulevard, command ship, generator, escape.
+--
+-- Progress is traced to sunrise.log through context:log (sdev log -Match script_log).
 local missions = require("missions")
 local mission = require(missions.MISSION_TOWERFALL)
-local campaign = require("lib.campaign")
-local unit, line, move = campaign.unit, campaign.line, campaign.move
-local Slot, Squad, Directive = mission.Slot, mission.Squad, mission.Directive
-local cue = mission.DialogueCue.M_DIALOG_SENSOR_80B50913
+local lib = require("lib.mission_lib")
+local flow = require("lib.flow")
+local dialogue = require("lib.dialogue")
+local content = require("mission_towerfall.content")(mission)
 
--- The Underwatch crowd, Shaxx and the frames dress the opening. They carry no objective.
-local underwatch_cast = {
-    id = "cast",
-    squads = {
-        unit(Squad.SQ_SHAXX, Slot.SQ_SHAXX),
-        unit(Squad.SQ_FRAME, Slot.SQ_FRAME),
-        unit(Squad.SQ_CAYDE, Slot.SQ_CAYDE),
-        unit(Squad.SQ_IKORA_80B50CA7, Slot.SQ_IKORA_80B50CA7),
-        unit(Squad.SQ_LEGIONARYA, Slot.SQ_LEGIONARYA),
-        unit(Squad.SQ_LEGIONARYB, Slot.SQ_LEGIONARYB),
-        unit(Squad.SQ_LEGIONARYC, Slot.SQ_LEGIONARYC),
-        unit(Squad.SQ_RED_GUARD, Slot.SQ_RED_GUARD),
-        unit(Squad.SQ_RED_GUARD_ADS, Slot.SQ_RED_GUARD_ADS),
-        unit(Squad.SQ_FRAME_FAKE_FIGHT, Slot.SQ_FRAME_FAKE_FIGHT),
-        unit(Squad.SQ_RED_GUARD_FAKE_FIGHT, Slot.SQ_RED_GUARD_FAKE_FIGHT),
-        unit(Squad.SQ_CIVILIAN_CATATONIC, Slot.SQ_CIVILIAN_CATATONIC),
-        unit(Squad.SQ_CIVILIAN_KNEEL, Slot.SQ_CIVILIAN_KNEEL),
-        unit(Squad.SQ_CIVILIAN_STAND, Slot.SQ_CIVILIAN_STAND),
-        unit(Squad.SQ_CIVILIAN_WALL_SIT_A, Slot.SQ_CIVILIAN_WALL_SIT_A),
-        unit(Squad.SQ_CIVILIAN_WALL_SIT_B, Slot.SQ_CIVILIAN_WALL_SIT_B),
-        unit(Squad.SQ_CIVILIAN_WALL_SIT_C, Slot.SQ_CIVILIAN_WALL_SIT_C),
-        unit(Squad.SQ_CIVILIAN_GROUND_1, Slot.SQ_CIVILIAN_GROUND_1),
-        unit(Squad.SQ_CIVILIAN_GROUND_2, Slot.SQ_CIVILIAN_GROUND_2),
-        unit(Squad.SQ_CIVILIAN_ON_KNEES_CRYING, Slot.SQ_CIVILIAN_ON_KNEES_CRYING),
-        unit(Squad.SQ_CIVILIAN_HERO_MOMENT, Slot.SQ_CIVILIAN_HERO_MOMENT),
+local KEY = "hc"
+-- Dawn sends a scene's entry inputs no sooner than this after its activation reaches transport.
+local SCENE_ENTRY_MS = 500
+-- Dawn holds a clear for this long before it counts.
+local SETTLE_MS = 3000
+
+local INTRO = "hc.intro"
+local INTRO_PLAYING, INTRO_ENDED = 1, 2
+local CAYDE_FINISHED = "hc.cayde.finished"
+
+local talk = dialogue.new{key = KEY, sensor = content.sensors.dialogue, windows = content.dialogue_windows}
+
+local function trace(context, text)
+    local log = context.log
+    if log ~= nil then log(context, "homecoming: " .. text) end
+end
+
+-- ---- presentation ------------------------------------------------------------------------------
+
+-- A goal without a navpoint keeps its text and shows no marker.
+local function show(context, goal)
+    context:slot(content.sensors.directive):set_directive{
+        directive = goal.directive,
+        state = goal.state,
+        navpoint = goal.navpoint ~= nil and context:slot(goal.navpoint) or nil,
+        waypoint = goal.waypoint ~= nil and context:slot(goal.waypoint) or nil,
+    }
+end
+
+-- One music section at a time: the previous one is switched off first.
+local MUSIC = "hc.music"
+local function music(context, state, section)
+    local previous = state:variable(MUSIC)
+    if previous == section then return end
+    local sensor = context:slot(content.sensors.music)
+    if previous ~= nil then sensor:set_music_section{section = previous, enabled = false} end
+    sensor:set_music_section{section = section, enabled = true}
+    context:set_variable(MUSIC, section)
+end
+
+-- ---- triggers ----------------------------------------------------------------------------------
+
+-- A trigger fires once per arming. Every arm after its first fires on each update while the player
+-- stays inside, so a trigger is disarmed when it reports.
+local function armed_key(slot) return "armed/" .. slot.id end
+
+local function arm(context, source)
+    local slot = context:slot(source)
+    context:set_variable(armed_key(slot), true)
+    slot:fire_trigger()
+end
+
+local function trigger_fact(name)
+    local source = lib.one(content.triggers[name], name)
+    return {id = "pt." .. name, observe = function(context, _, event)
+        return lib.is_slot(context, event, source)
+    end}
+end
+
+local function pt(name) return flow.fact("pt." .. name) end
+
+-- ---- squads ------------------------------------------------------------------------------------
+
+-- Objective first, then placement.
+local function spawn(encounter)
+    return function(context)
+        for _, member in ipairs(encounter) do
+            context:slot(member.source):assign_combat_objective{objective = context:slot(member.objective)}
+            context:squad(member.squad):place{}
+        end
+    end
+end
+
+local function cleared(squads)
+    return function(context) return context:cohort{squads = squads}.cleared end
+end
+
+-- A clear counts after it has held for SETTLE_MS. The timer re-arms itself while the cohort is not
+-- cleared, so a squad that comes back resets the wait instead of passing it.
+local function settle_timer(name) return "hc.settle." .. name end
+local function settled_fact(name, squads)
+    local timer = settle_timer(name)
+    return {id = "settled." .. name, observe = function(context, _, event)
+        if event.timer_name ~= timer then return false end
+        if context:cohort{squads = squads}.cleared then return true end
+        context:start_timer(timer, SETTLE_MS)
+        return false
+    end}
+end
+
+-- ---- hero scenes -------------------------------------------------------------------------------
+
+-- activate{spawn=true} spawns the scene's authored cast. Its entry event is sent SCENE_ENTRY_MS
+-- after the activation reaches transport ("staged"). A refused activation is logged and still
+-- releases the step after it, so a broken scene cannot block the mission.
+local function hero_request_key(name) return "hc.scene." .. name .. ".request" end
+local function hero_timer(name) return "hc.scene." .. name .. ".entry" end
+
+local function activate_hero(context, name)
+    local hero = content.heroes[name]
+    for _, cell in ipairs(hero.bind or {}) do context:slot(cell):bind_combatant_to_squad() end
+    local request = context:scene(hero.scene):activate{spawn = true}
+    context:set_variable(hero_request_key(name), request.value)
+    trace(context, "scene " .. name .. " activated")
+end
+
+local function hero_entry(context, name)
+    local hero = content.heroes[name]
+    context:scene(hero.scene):send_event{key = hero.entry}
+    trace(context, "scene " .. name .. " entry event")
+end
+
+local function hero_ready_fact(name)
+    local timer = hero_timer(name)
+    return {id = "scene." .. name .. ".ready", observe = function(_, _, event)
+        return event.timer_name == timer
+    end}
+end
+
+-- ---- flow --------------------------------------------------------------------------------------
+
+local graph
+local facts = {
+    -- The arrival answer for Underwatch: the client has loaded region 72 and placed the player.
+    {id = "arrival", observe = function(_, _, event)
+        return event.entered == true and event.held_region_index == content.underwatch.region_index
+    end},
+    settled_fact("first_contact", content.first_contact),
+    settled_fact("approach", content.approach),
+}
+for _, name in ipairs(content.trigger_order) do facts[#facts + 1] = trigger_fact(name) end
+for _, name in ipairs(content.hero_order) do facts[#facts + 1] = hero_ready_fact(name) end
+
+local function cayde_finished(_, state) return state:variable(CAYDE_FINISHED) == true end
+
+graph = flow.new{key = "homecoming", facts = facts, steps = {
+    {id = "arrival", await = flow.fact("arrival")},
+
+    -- U0: landing. Goal, music, the wall shut, Shaxx's doors and blocker, the hallway cast, Ghost.
+    {id = "landing", after = {"arrival"}, run = function(context, state)
+        show(context, content.goals.defend)
+        music(context, state, content.music.underwatch_ruins)
+        context:slot(content.wall):transition{transition = context.sdk.device_transitions.close}
+        local doors = {content.shaxx_doors[1], content.shaxx_doors[2], content.shaxx_blocker}
+        context:activate_objects{slots = doors, active = true}
+        for _, squad in ipairs(content.landing_squads) do context:squad(squad):place{} end
+        for _, name in ipairs(content.trigger_order) do arm(context, content.triggers[name]) end
+        talk:say(context, state, content.lines.landing)
+    end},
+    -- U1: ambient scenes.
+    {id = "ambient", after = {"arrival"}, run = function(context)
+        for _, ambient in ipairs(content.ambient_scenes) do context:scene(ambient):activate{spawn = true} end
+    end},
+
+    -- U2-U3: the wall. Music, the backups, then the breach scene; its entry blows the wall.
+    {id = "wall", after = {"landing"}, await = pt("wall")},
+    {id = "breach", after = {"wall"}, run = function(context, state)
+        music(context, state, content.music.first_cabal)
+        spawn(content.encounters.breach_backup)(context)
+        activate_hero(context, "breach")
+    end, await = flow.fact("scene.breach.ready")},
+    {id = "breach_entry", after = {"breach"}, run = function(context, state)
+        hero_entry(context, "breach")
+        context:slot(content.wall):transition{transition = context.sdk.device_transitions.open}
+        talk:say(context, state, content.lines.breach)
+    end},
+    -- U4: "Cabal" purpose line once the first contact is down (no fixed delay).
+    {id = "first_contact_down", after = {"breach_entry"}, await = cleared(content.first_contact)},
+    {id = "first_contact_settle", after = {"first_contact_down"}, run = function(context)
+        context:start_timer(settle_timer("first_contact"), SETTLE_MS)
+    end, await = flow.fact("settled.first_contact")},
+    {id = "first_contact_line", after = {"first_contact_settle"}, run = function(context, state)
+        talk:say(context, state, content.lines.first_contact)
+    end},
+
+    -- U5-U7: the Centurion's scene, then its rush and drop-pod reinforcements at their triggers.
+    {id = "centurion", after = {"landing"}, await = pt("centurion")},
+    {id = "centurion_scene", after = {"centurion"}, run = function(context)
+        activate_hero(context, "centurion")
+    end, await = flow.fact("scene.centurion.ready")},
+    {id = "centurion_entry", after = {"centurion_scene"}, run = function(context)
+        hero_entry(context, "centurion")
+    end},
+    {id = "centurion_rush", after = {"landing"}, await = pt("centurion_reinforce")},
+    {id = "centurion_rush_spawn", after = {"centurion_rush"}, run = spawn(content.encounters.centurion_rush)},
+    {id = "drop_pod", after = {"landing"}, await = pt("drop_pod")},
+    {id = "drop_pod_spawn", after = {"drop_pod"}, run = spawn(content.encounters.drop_pod)},
+
+    -- U8-U9: civilians running from the blast; the hero moment.
+    {id = "civ_run", after = {"landing"}, await = pt("civ_run")},
+    {id = "civ_run_scenes", after = {"civ_run"}, run = function(context, state)
+        for _, run_scene in ipairs(content.civ_run_scenes) do context:scene(run_scene):activate{spawn = true} end
+        talk:say(context, state, content.lines.civ_run)
+    end},
+    {id = "hero_moment", after = {"landing"}, await = pt("hero_moment")},
+    {id = "hero_moment_scene", after = {"hero_moment"}, run = function(context)
+        context:scene(content.hero_moment):activate{spawn = true}
+    end},
+
+    -- U10: the approach is clear once every wave so far is down and has stayed down.
+    {id = "approach_down", after = {"breach_entry", "centurion_entry", "centurion_rush_spawn", "drop_pod_spawn"},
+        await = cleared(content.approach)},
+    {id = "approach_settle", after = {"approach_down"}, run = function(context)
+        context:start_timer(settle_timer("approach"), SETTLE_MS)
+    end, await = flow.fact("settled.approach")},
+
+    -- U11-U12: Cayde. His entry also drops Shaxx's blocker and quietly starts Shaxx's scene, so
+    -- Shaxx exists by the time the player reaches him.
+    {id = "cayde_near", after = {"approach_settle"},
+        await = flow.any(pt("shaxx_enters"), pt("shaxx_enters_backup"))},
+    {id = "cayde", after = {"cayde_near"}, run = function(context)
+        activate_hero(context, "cayde")
+    end, await = flow.fact("scene.cayde.ready")},
+    {id = "cayde_entry", after = {"cayde"}, run = function(context)
+        hero_entry(context, "cayde")
+        context:activate_objects{slots = {content.shaxx_blocker}, active = false}
+        activate_hero(context, "shaxx")
+    end},
+    -- U13: music changes when Cayde's scene is done. Only the music waits for it.
+    {id = "cayde_done", after = {"cayde_entry"}, await = cayde_finished},
+    {id = "after_cayde", after = {"cayde_done"}, run = function(context, state)
+        music(context, state, content.music.after_cayde)
+    end},
+    -- U14: Shaxx sends the player to gear up. Never wait on Shaxx's scene finishing.
+    {id = "shaxx_near", after = {"after_cayde"},
+        await = flow.all(flow.any(pt("start_shaxx"), pt("near_shaxx")), flow.fact("scene.shaxx.ready"))},
+    {id = "shaxx", after = {"shaxx_near"}, run = function(context)
+        hero_entry(context, "shaxx")
+        show(context, content.goals.gear_up)
+        trace(context, "Underwatch complete; the armory is not scripted yet")
+    end},
+}}
+
+-- ---- intro -------------------------------------------------------------------------------------
+
+-- The client holds the cutscene region, so only its start is owed. The spawn is held through the
+-- cutscene: a body built there would be placed inside Underwatch's geometry.
+local function start_intro(context, state, region)
+    if region ~= content.intro.state.region_index or state:variable(INTRO) ~= nil then return end
+    context:set_variable(INTRO, INTRO_PLAYING)
+    context:slot(content.intro.cinematic):set_cinematic_active{active = true}
+    trace(context, "intro cinematic started")
+end
+
+local function end_intro(context, state)
+    if state:variable(INTRO) ~= INTRO_PLAYING then return end
+    context:set_variable(INTRO, INTRO_ENDED)
+    -- Stop before the state change, or the rebuilt component plays the cutscene again.
+    context:slot(content.intro.cinematic):set_cinematic_active{active = false}
+    context:select_state(content.underwatch, content.omit)
+    context:hold_spawn{active = false}
+    trace(context, "intro ended; selecting Underwatch")
+end
+
+local function end_reported_intro(context, state, event)
+    if lib.is_slot(context, event, content.intro.cinematic) then end_intro(context, state) end
+end
+
+-- ---- event plumbing ----------------------------------------------------------------------------
+
+local function handle(context, state, event)
+    graph:handle(context, state, event)
+end
+
+local function player_trigger(context, state, event)
+    if event.slot ~= nil and state:variable(armed_key(event.slot)) == true then
+        context:clear_variable(armed_key(event.slot))
+        event.slot:disarm_trigger()
+    end
+    handle(context, state, event)
+end
+
+-- A hero activation reaching transport starts its entry timer; a refusal is logged and starts it
+-- anyway, so the steps after the scene still run.
+local function effect_result(context, state, event)
+    if event.request_key == nil then return end
+    for _, name in ipairs(content.hero_order) do
+        local key = hero_request_key(name)
+        local pending = state:variable(key)
+        if pending ~= nil and event.request_key.value == pending then
+            context:clear_variable(key)
+            if event.outcome ~= "transport_staged" then
+                trace(context, "scene " .. name .. " activation " .. tostring(event.outcome))
+            end
+            context:start_timer(hero_timer(name), SCENE_ENTRY_MS)
+            return
+        end
+    end
+end
+
+local function scene_finished(context, state, event)
+    if lib.is_slot(context, event, content.heroes.cayde.slot) then
+        context:set_variable(CAYDE_FINISHED, true)
+        trace(context, "scene cayde finished")
+    end
+    handle(context, state, event)
+end
+
+return {
+    initial_state = {
+        region_index = content.intro.state.region_index,
+        omit = content.omit,
     },
-}
-
--- "Watch out!" then "Cabal!" as the drop pod lands.
-local first_contact = {
-    id = "contact",
-    trigger = Slot.PT_DROP_POD,
-    objective = Slot.OBJ_CABAL_FIRST_CONTACT,
-    lines = {line(cue.CUE_4), line(cue.CUE_5)},
-    squads = {
-        unit(Squad.SQUAD_FIRST_CONTACT_CABAL, Slot.SQUAD_FIRST_CONTACT_CABAL),
-        unit(Squad.SQUAD_FIRST_CONTACT_CABAL_BACKUP_A, Slot.SQUAD_FIRST_CONTACT_CABAL_BACKUP_A),
-        unit(Squad.SQUAD_FIRST_CONTACT_CABAL_BACKUP_B, Slot.SQUAD_FIRST_CONTACT_CABAL_BACKUP_B),
-        unit(Squad.SQ_CABAL_HERO_MOMENT, Slot.SQ_CABAL_HERO_MOMENT),
-        unit(Squad.SQ_CABAL_HERO_MOMENT_B, Slot.SQ_CABAL_HERO_MOMENT_B),
-    },
-}
-
-local centurion = {
-    id = "centurion",
-    trigger = Slot.PT_CENTURION_INTRO,
-    objective = Slot.OBJ_CENTURION_INTRO,
-    squads = {
-        unit(Squad.SQ_CENTURION_INTRO, Slot.SQ_CENTURION_INTRO),
-        unit(Squad.SQ_CENTURION_INTRO_RUSH, Slot.SQ_CENTURION_INTRO_RUSH),
-        unit(Squad.SQ_CENTURION_INTRO_BACKUP, Slot.SQ_CENTURION_INTRO_BACKUP),
-    },
-}
-
-local wall = {
-    id = "wall",
-    trigger = Slot.PT_WALL_EXPLODE,
-    on_start = function(context) move(context, {Slot.D_UNDERWATCH_COLLAPSING_WALL}, "open") end,
-}
-
-local post_gun = {
-    id = "post_gun",
-    trigger = Slot.PT_POSTGUN,
-    after = "gear",
-    objective = Slot.OBJ_POST_GUN,
-    squads = {
-        unit(Squad.SQ_FRAME_POST_GUN, Slot.SQ_FRAME_POST_GUN),
-        unit(Squad.SQ_RED_GUARD_POST_GUN, Slot.SQ_RED_GUARD_POST_GUN),
-        unit(Squad.SQ_RED_GUARD_POST_GUN_JUMP, Slot.SQ_RED_GUARD_POST_GUN_JUMP),
-    },
-}
-
-local hangar = {
-    id = "hangar_fight",
-    trigger = Slot.PT_HANGAR_SPAWN,
-    objective = Slot.OBJ_HANGAR,
-    squads = {
-        unit(Squad.SQ_MILITARY_HALLWAY_DESTRUCTION, Slot.SQ_MILITARY_HALLWAY_DESTRUCTION),
-        unit(Squad.SQ_HANGAR_OVERLOOK_A_A, Slot.SQ_HANGAR_OVERLOOK_A_A),
-        unit(Squad.SQ_HANGAR_OVERLOOK_A_A_CENT, Slot.SQ_HANGAR_OVERLOOK_A_A_CENT),
-        unit(Squad.SQ_HANGAR_OVERLOOK_A_B, Slot.SQ_HANGAR_OVERLOOK_A_B),
-        unit(Squad.SQ_HANGAR_OVERLOOK_A_C, Slot.SQ_HANGAR_OVERLOOK_A_C),
-        unit(Squad.SQ_HANGAR_OVERLOOK_B_A, Slot.SQ_HANGAR_OVERLOOK_B_A),
-        unit(Squad.SQ_HANGAR_OVERLOOK_B_B, Slot.SQ_HANGAR_OVERLOOK_B_B),
-        unit(Squad.SQ_HANGAR_OVERLOOK_B_C, Slot.SQ_HANGAR_OVERLOOK_B_C),
-        unit(Squad.SQ_HANGAR_OVERLOOK_SNIPER, Slot.SQ_HANGAR_OVERLOOK_SNIPER),
-        unit(Squad.SQ_HANGAR_A_A, Slot.SQ_HANGAR_A_A),
-        unit(Squad.SQ_HANGAR_A_A_FLANK, Slot.SQ_HANGAR_A_A_FLANK),
-        unit(Squad.SQ_HANGAR_A_B, Slot.SQ_HANGAR_A_B),
-        unit(Squad.SQ_HANGAR_A_B_SNIPER, Slot.SQ_HANGAR_A_B_SNIPER),
-        unit(Squad.SQ_HANGAR_FODDER_A, Slot.SQ_HANGAR_FODDER_A),
-        unit(Squad.SQ_HANGAR_FODDER_B, Slot.SQ_HANGAR_FODDER_B),
-        unit(Squad.SQ_HANGAR_FODDER_C, Slot.SQ_HANGAR_FODDER_C),
-        unit(Squad.SQ_FRIENDLIES_EARLY, Slot.SQ_FRIENDLIES_EARLY),
-        unit(Squad.SQ_FRIENDLIES_EARLY_UPPER, Slot.SQ_FRIENDLIES_EARLY_UPPER),
-        unit(Squad.SQ_RED_GUARD_FAKE_FIGHT_A, Slot.SQ_RED_GUARD_FAKE_FIGHT_A),
-        unit(Squad.SQ_RED_GUARD_FAKE_FIGHT_B, Slot.SQ_RED_GUARD_FAKE_FIGHT_B),
-        unit(Squad.SQ_RED_GUARD_FAKE_FIGHT_C, Slot.SQ_RED_GUARD_FAKE_FIGHT_C),
-        unit(Squad.SQ_FRAME_COVER_A, Slot.SQ_FRAME_COVER_A),
-        unit(Squad.SQ_FRAME_COVER_B, Slot.SQ_FRAME_COVER_B),
-        unit(Squad.SQ_FRAME_COVER_C, Slot.SQ_FRAME_COVER_C),
-        unit(Squad.SQ_FRAME_THROW_A, Slot.SQ_FRAME_THROW_A),
-        unit(Squad.SQ_RED_GUARD_THROW_A, Slot.SQ_RED_GUARD_THROW_A),
-    },
-}
-
-local plaza_hold = {
-    id = "plaza_hold",
-    trigger = Slot.PT_PLAZA_SPAWN_INIT,
-    objective = Slot.OBJ_PLAZA_KILL_CABAL,
-    squads = {
-        unit(Squad.SQUAD_KILL_CABAL_1, Slot.SQUAD_KILL_CABAL_1),
-        unit(Squad.SQUAD_KILL_CABAL_2, Slot.SQUAD_KILL_CABAL_2),
-        unit(Squad.SQUAD_KILL_CABAL_3, Slot.SQUAD_KILL_CABAL_3),
-        unit(Squad.SQUAD_KILL_CABAL_4, Slot.SQUAD_KILL_CABAL_4),
-        unit(Squad.SQUAD_KILL_CABAL_5, Slot.SQUAD_KILL_CABAL_5),
-        unit(Squad.SQUAD_KILL_CABAL_6, Slot.SQUAD_KILL_CABAL_6),
-        unit(Squad.SQUAD_KILL_CABAL_7, Slot.SQUAD_KILL_CABAL_7),
-        unit(Squad.SQUAD_KILL_CABAL_8, Slot.SQUAD_KILL_CABAL_8),
-        unit(Squad.SQUAD_CABAL_DROPOFF_1, Slot.SQUAD_CABAL_DROPOFF_1),
-    },
-}
-
-local zavala = {
-    id = "zavala_cast",
-    trigger = Slot.PT_PLAZA_ZAVALA_MEET,
-    squads = {
-        unit(Squad.SQ_ZAVALA, Slot.SQ_ZAVALA),
-        unit(Squad.SQ_PLAZA_INTERIM_A_A, Slot.SQ_PLAZA_INTERIM_A_A),
-        unit(Squad.SQ_PLAZA_INTERIM_A_B, Slot.SQ_PLAZA_INTERIM_A_B),
-    },
-}
-
--- The defend volume covers the plaza, so the wave waits for the defend goal as well.
-local plaza_defend = {
-    id = "plaza_waves",
-    trigger = Slot.PT_DEFEND,
-    after = "defend",
-    objective = Slot.OBJ_PLAZA_REINFORCE,
-    lines = {line(cue.CUE_52)},
-    squads = {
-        unit(Squad.SQ_PLAZA_REINFORCE_START_A, Slot.SQ_PLAZA_REINFORCE_START_A),
-        unit(Squad.SQ_PLAZA_REINFORCE_START_B, Slot.SQ_PLAZA_REINFORCE_START_B),
-        unit(Squad.SQ_PLAZA_REINFORCE_A_A, Slot.SQ_PLAZA_REINFORCE_A_A),
-        unit(Squad.SQ_PLAZA_REINFORCE_A_A_EXTRA, Slot.SQ_PLAZA_REINFORCE_A_A_EXTRA),
-        unit(Squad.SQ_PLAZA_REINFORCE_A_B, Slot.SQ_PLAZA_REINFORCE_A_B),
-        unit(Squad.SQ_PLAZA_REINFORCE_A_C, Slot.SQ_PLAZA_REINFORCE_A_C),
-        unit(Squad.SQ_PLAZA_REINFORCE_A_D, Slot.SQ_PLAZA_REINFORCE_A_D),
-        unit(Squad.SQ_PLAZA_REINFORCE_A_D_EXTRA, Slot.SQ_PLAZA_REINFORCE_A_D_EXTRA),
-        unit(Squad.SQ_PLAZA_REINFORCE_B_A, Slot.SQ_PLAZA_REINFORCE_B_A),
-        unit(Squad.SQ_PLAZA_REINFORCE_B_A_EXTRA, Slot.SQ_PLAZA_REINFORCE_B_A_EXTRA),
-        unit(Squad.SQ_PLAZA_REINFORCE_B_B, Slot.SQ_PLAZA_REINFORCE_B_B),
-        unit(Squad.SQ_PLAZA_REINFORCE_B_B_EXTRA, Slot.SQ_PLAZA_REINFORCE_B_B_EXTRA),
-    },
-}
-
-local bazaar = {
-    id = "bazaar",
-    trigger = Slot.PT_BAZAAR,
-    after = "boulevard",
-    objective = Slot.OBJ_BAZAAR,
-    squads = {
-        unit(Squad.SQ_BAZAAR_START, Slot.SQ_BAZAAR_START),
-        unit(Squad.SQ_BAZAAR_TEASE_A, Slot.SQ_BAZAAR_TEASE_A),
-        unit(Squad.SQ_BAZAAR_TEASE_B, Slot.SQ_BAZAAR_TEASE_B),
-        unit(Squad.SQ_BAZAAR_A_A, Slot.SQ_BAZAAR_A_A),
-        unit(Squad.SQ_BAZAAR_A_B, Slot.SQ_BAZAAR_A_B),
-        unit(Squad.SQ_BAZAAR_A_C, Slot.SQ_BAZAAR_A_C),
-        unit(Squad.SQ_BAZAAR_FINALE, Slot.SQ_BAZAAR_FINALE),
-        unit(Squad.SQ_FLAME, Slot.SQ_FLAME),
-        unit(Squad.SQ_IKORA_80B5011F, Slot.SQ_IKORA_80B5011F),
-        unit(Squad.SQUAD_CABAL_BLASTED_1, Slot.SQUAD_CABAL_BLASTED_1),
-        unit(Squad.SQUAD_CABAL_BLASTED_2, Slot.SQUAD_CABAL_BLASTED_2),
-        unit(Squad.SQUAD_CABAL_BLASTED_3, Slot.SQUAD_CABAL_BLASTED_3),
-        unit(Squad.SQUAD_CABAL_BLASTED_4, Slot.SQUAD_CABAL_BLASTED_4),
-    },
-}
-
-local ship_entry = {
-    id = "ship_entry",
-    trigger = Slot.PT_DAMAGED,
-    objective = Slot.OBJ_DAMAGED,
-    on_start = function(context)
-        move(context, {Slot.D_SHIP_POD_DOOR_A, Slot.D_SHIP_POD_DOOR_B, Slot.D_SHIP_DOOR_ENTER},
-            "open")
+    on_start = function(context, state)
+        context:hold_spawn{active = true}
+        graph:advance(context, state)
     end,
-    squads = {
-        unit(Squad.SQ_PODS, Slot.SQ_PODS),
-        unit(Squad.SQ_DAMAGED, Slot.SQ_DAMAGED),
-        unit(Squad.SQ_DAMAGED_HALL_FRONT, Slot.SQ_DAMAGED_HALL_FRONT),
-        unit(Squad.SQ_DAMAGED_HALL_REAR, Slot.SQ_DAMAGED_HALL_REAR),
-        unit(Squad.SQ_DAMAGED_HALL_REAR_ANCHOR, Slot.SQ_DAMAGED_HALL_REAR_ANCHOR),
-        unit(Squad.SQ_DAMAGED_HALL_MELEE, Slot.SQ_DAMAGED_HALL_MELEE),
-        unit(Squad.SQ_DAMAGED_HALL_REAR_STAIR, Slot.SQ_DAMAGED_HALL_REAR_STAIR),
-        unit(Squad.SQ_DAMAGED_HALL_REAR_STAIR_ANCHOR, Slot.SQ_DAMAGED_HALL_REAR_STAIR_ANCHOR),
-    },
-}
-
-local deck = {
-    id = "deck",
-    trigger = Slot.PT_DECK_START,
-    squads = {
-        unit(Squad.SQ_DECK_FRONT_A_A, Slot.SQ_DECK_FRONT_A_A),
-        unit(Squad.SQ_DECK_FRONT_A_B, Slot.SQ_DECK_FRONT_A_B),
-        unit(Squad.SQ_DECK_FRONT_A_C, Slot.SQ_DECK_FRONT_A_C),
-        unit(Squad.SQ_DECK_FRONT_B_A, Slot.SQ_DECK_FRONT_B_A),
-        unit(Squad.SQ_DECK_FRONT_B_B, Slot.SQ_DECK_FRONT_B_B),
-        unit(Squad.SQ_DECK_FRONT_B_C, Slot.SQ_DECK_FRONT_B_C),
-        unit(Squad.SQ_DECK_FRONT_C_A, Slot.SQ_DECK_FRONT_C_A),
-        unit(Squad.SQ_DECK_HARDPOINT_L, Slot.SQ_DECK_HARDPOINT_L),
-        unit(Squad.SQ_DECK_HARDPOINT_L2, Slot.SQ_DECK_HARDPOINT_L2),
-        unit(Squad.SQ_DECK_HARDPOINT_L_LOWER, Slot.SQ_DECK_HARDPOINT_L_LOWER),
-        unit(Squad.SQ_DECK_HARDPOINT_R, Slot.SQ_DECK_HARDPOINT_R),
-        unit(Squad.SQ_DECK_MINIBOSS, Slot.SQ_DECK_MINIBOSS),
-    },
-}
-
-local deck_boss = {
-    id = "deck_boss",
-    trigger = Slot.PT_DECK_BOSS,
-    objective = Slot.OBJ_DECK_ULTRA,
-    squads = {unit(Squad.SQ_DECK_ULTRA, Slot.SQ_DECK_ULTRA)},
-}
-
-local shield_room = {
-    id = "shield_room",
-    trigger = Slot.PT_MATRIX_DOOR,
-    on_start = function(context) move(context, {Slot.D_SHIP_DOOR}, "open") end,
-    squads = {
-        unit(Squad.SQ_SHIP_DOOR_MELEE, Slot.SQ_SHIP_DOOR_MELEE),
-        unit(Squad.SQ_SHIP_DOOR_MELEE_C, Slot.SQ_SHIP_DOOR_MELEE_C),
-        unit(Squad.SQ_SHIP_DOOR_MELEE_D, Slot.SQ_SHIP_DOOR_MELEE_D),
-        unit(Squad.SQ_SHIP_DOOR_MELEE_E, Slot.SQ_SHIP_DOOR_MELEE_E),
-        unit(Squad.SQ_SHIP_ENTRY_A_B, Slot.SQ_SHIP_ENTRY_A_B),
-        unit(Squad.SQ_SHIP_ENTRY_A_B_O, Slot.SQ_SHIP_ENTRY_A_B_O),
-        unit(Squad.SQ_SHIELD_SNIPES, Slot.SQ_SHIELD_SNIPES),
-        unit(Squad.SQ_SHIELD_FRONT, Slot.SQ_SHIELD_FRONT),
-        unit(Squad.SQ_SHIELD_MID, Slot.SQ_SHIELD_MID),
-        unit(Squad.SQ_SHIELD_REAR, Slot.SQ_SHIELD_REAR),
-        unit(Squad.SQ_SHIELD_MELEE, Slot.SQ_SHIELD_MELEE),
-        unit(Squad.SQ_SHIELD_GEN_C, Slot.SQ_SHIELD_GEN_C),
-    },
-}
-
-local turbine_guard = {
-    id = "turbine_guard",
-    after = "overload",
-    squads = {
-        unit(Squad.SQ_SHIELD_GEN_A, Slot.SQ_SHIELD_GEN_A),
-        unit(Squad.SQ_SHIELD_GEN_B, Slot.SQ_SHIELD_GEN_B),
-    },
-}
-
-local ghaul = {
-    id = "ghaul",
-    trigger = Slot.PT_ENGINE_ROOM_GHAUL,
-    after = "overload",
-    objective = Slot.OBJ_GHAUL,
-    on_start = function(context) move(context, {Slot.D_GHAUL_DESCENT}, "open") end,
-    squads = {unit(Squad.SQ_GHAUL, Slot.SQ_GHAUL)},
-}
-
-local escape_guard = {
-    id = "escape_guard",
-    after = "escape",
-    squads = {
-        unit(Squad.SQ_ESCAPE_A, Slot.SQ_ESCAPE_A),
-        unit(Squad.SQ_ESCAPE_B, Slot.SQ_ESCAPE_B),
-    },
-}
-
-return campaign.new{
-    key = "towerfall",
-    directive_sensor = Slot.M_DIRECTIVE_SENSOR_80B50913,
-    dialogue_sensor = Slot.M_DIALOG_SENSOR_80B50913,
-    -- Retail opens on Zavala's briefing as the attack starts, then the Guardian flying in.
-    -- prefab_hro is the fly-in, seen live. The briefing is none of this scenario's cutscenes.
-    -- TODO: play the briefing; it is the movie of activity row 265, which the menu does not offer.
-    -- The spawn after the cutscene comes from the settings arrival override for this package.
-    intro = {
-        {state = mission.states.STATE_80B500BC_0002_0001_80B500B1,
-            cinematic = Slot.PREFAB_HRO_CINEMATIC},
-    },
-    legs = {
-        {id = "underwatch", state = mission.states.STATE_80B500BC_0009_0000_80B500BB, arm = {
-            Slot.PT_START, Slot.PT_WEAPON, Slot.PT_PLAYER_NEAR_SHAXX, Slot.PT_WEAPON_COMPLETE,
-            Slot.PT_GOTO_MILITARY, Slot.PT_DROP_POD, Slot.PT_CENTURION_INTRO,
-            Slot.PT_WALL_EXPLODE, Slot.PT_POSTGUN,
-        }},
-        {id = "military", state = mission.states.STATE_80B500BC_0004_0000_80B500B3, arm = {
-            Slot.PT_GOTO_PLAZA_80B50B91, Slot.PT_DIALOGUE_HANGAR_WINDOW, Slot.PT_HANGAR_SPAWN,
-        }},
-        {id = "plaza", state = mission.states.STATE_80B500BC_0006_0000_80B500B6, arm = {
-            Slot.PT_GOTO_PLAZA_80B51058, Slot.PT_PLAZA_SPAWN_INIT, Slot.PT_PLAZA_ZAVALA_MEET,
-            Slot.PT_DEFEND, Slot.PT_GOTO_BOULEVARD,
-        }},
-        {id = "boulevard", state = mission.states.STATE_80B500BC_0000_0000_80B500AD, arm = {
-            Slot.PT_GOTO_SPEAKER, Slot.PT_GOTO_SKY_BATTLE, Slot.PT_BAZAAR,
-        }},
-        {id = "sky_battle", state = mission.states.STATE_80B500BC_0008_0000_80B500B8, arm = {
-            Slot.PT_SKYBATTLE_3, Slot.PT_DIALOG_ALMOST_THERE, Slot.PT_DESTROY_BATTLESHIP,
-            Slot.PT_GOTO_END, Slot.PT_DAMAGED, Slot.PT_DECK_START, Slot.PT_DECK_BOSS,
-            Slot.PT_MATRIX_DOOR, Slot.PT_ENGINE_ROOM_GHAUL,
-        }},
-    },
-    steps = {
-        -- "Let's get moving. We need to find Zavala, Ikora, and Cayde."
-        {id = "home", directive = Directive.DEFEND_YOUR_HOME, navpoint = Slot.AP_IKORA,
-            lines = {line(cue.CUE_1)},
-            ends = {trigger = Slot.PT_PLAYER_NEAR_SHAXX}},
-        -- Shaxx opens his armory; the gun door is the way in.
-        {id = "gear", directive = Directive.GEAR_UP_FOR_THE_FIGHT,
-            navpoint = Slot.SLOT_0009_80B5168C,
-            on_start = function(context) move(context, {Slot.D_GUN_DOOR}, "open") end,
-            ends = {trigger = Slot.PT_WEAPON_COMPLETE}},
-        -- The evacuation announcement waits in the volume on the way down.
-        {id = "find", directive = Directive.FIND_ZAVALA_432D2C96,
-            navpoint = Slot.AP_GOTO_MILITARY_80B5168C,
-            lines = {line(cue.CUE_30, Slot.SLOT_0004_80B5168C)},
-            ends = {trigger = Slot.PT_GOTO_MILITARY}},
-        -- "Look at the size of that thing." waits at the hangar window.
-        {id = "hangar", directive = Directive.JOIN_ZAVALA_IN_THE_PLAZA,
-            navpoint = Slot.SLOT_0008_80B50B91,
-            lines = {line(cue.CUE_34, Slot.SLOT_0004_80B50B91)},
-            ends = {trigger = Slot.PT_GOTO_PLAZA_80B50B91}},
-        -- "What is that thing they're attaching?" waits at the plaza's edge.
-        {id = "zavala", directive = Directive.FIGHT_WITH_ZAVALA, navpoint = Slot.AP_PLAZA,
-            lines = {line(cue.CUE_40, Slot.SLOT_0019_80B51058)},
-            ends = {clear = "plaza_hold"}},
-        -- "Don't let them past the gate! The evac shuttles are back there!"
-        {id = "defend", directive = Directive.DEFEND_THE_TOWER,
-            lines = {line(cue.CUE_51)},
-            ends = {clear = "plaza_waves"}},
-        -- Ikora goes after the Speaker and Zavala sends the player with her.
-        {id = "speaker", directive = Directive.LEAVE_THE_PLAZA_AND_FIND_THE_SPEAKER_E68735ED,
-            navpoint = Slot.SLOT_000E_80B51058,
-            lines = {line(cue.CUE_59)},
-            ends = {trigger = Slot.PT_GOTO_BOULEVARD}},
-        -- "And flamethrowers." waits in the bazaar.
-        {id = "boulevard", directive = Directive.LEAVE_THE_PLAZA_AND_FIND_THE_SPEAKER,
-            navpoint = Slot.SLOT_000A_80B5097F,
-            lines = {line(cue.CUE_74, Slot.TV_BAZAAR_80B5097F)},
-            ends = {trigger = Slot.PT_GOTO_SPEAKER}},
-        -- Zavala calls Holliday in; her line waits at the pickup.
-        {id = "board", directive = Directive.BOARD_THE_COMMAND_SHIP,
-            navpoint = Slot.SLOT_0004_80B5097F,
-            lines = {line(cue.CUE_75), line(cue.CUE_76, Slot.SLOT_0009_80B5097F)},
-            ends = {trigger = Slot.PT_GOTO_SKY_BATTLE}},
-        -- The console's hologram holds the ship's schematic.
-        {id = "locate", directive = Directive.DISABLE_THE_SHIELDS, navpoint = Slot.AP_LOCATE,
-            lines = {line(cue.CUE_77)},
-            ends = {ghost_link = Slot.GL_CABAL_CONSOLE}},
-        -- "The shield generator should be at the bottom of the ship."
-        {id = "reach", directive = Directive.REACH_THE_SHIELD_GENERATOR,
-            navpoint = Slot.AP_DESTROY_BATTLESHIP,
-            lines = {line(cue.CUE_79), line(cue.CUE_84, Slot.SLOT_0011_80B51397)},
-            ends = {trigger = Slot.PT_DESTROY_BATTLESHIP}},
-        -- "Destroy the turbines. The shields should fizzle." The vents expose them.
-        {id = "overload", directive = Directive.OVERLOAD_THE_GENERATOR,
-            navpoint = Slot.SLOT_000C_80B51397,
-            lines = {line(cue.CUE_86)},
-            on_start = function(context)
-                move(context, {Slot.D_VENTS_A, Slot.D_VENTS_B, Slot.D_VENTS_C,
-                    Slot.D_SHIELD_GEN_A, Slot.D_SHIELD_GEN_B, Slot.D_SHIELD_GEN_COLLAR}, "open")
-            end,
-            ends = {destroyed = {Slot.SHIELD_GENERATOR_A, Slot.SHIELD_GENERATOR_B,
-                Slot.SHIELD_GENERATOR_C}}},
-        -- "Zavala! We did it! The shields are down!" then "Amanda! We're headed topside!"
-        {id = "escape", directive = Directive.ESCAPE_THE_COMMAND_SHIP,
-            navpoint = Slot.SLOT_0010_80B51397,
-            lines = {line(cue.CUE_91), line(cue.CUE_92)},
-            on_start = function(context) move(context, {Slot.D_SHIP_DOOR_EXIT}, "open") end,
-            ends = {trigger = Slot.PT_GOTO_END}},
-    },
-    encounters = {
-        underwatch_cast, first_contact, centurion, wall, post_gun, hangar, plaza_hold, zavala,
-        plaza_defend, bazaar, ship_entry, deck, deck_boss, shield_room, turbine_guard, ghaul,
-        escape_guard,
-    },
+    -- A reattach lands in the world, so a cutscene still marked playing is ended, not replayed.
+    on_load = function(context, state)
+        end_intro(context, state)
+        talk:resume(context, state)
+        graph:advance(context, state)
+    end,
+    on_event_region_changed = function(context, state, event)
+        start_intro(context, state, event.region_index)
+        handle(context, state, event)
+    end,
+    -- Only the arrival answer feeds the graph: a pending leg report names a region not yet loaded.
+    on_event_client_state_changed = function(context, state, event)
+        if event.entered == true then
+            start_intro(context, state, event.held_region_index)
+            handle(context, state, event)
+        end
+    end,
+    on_event_cinematic_terminated = end_reported_intro,
+    on_event_cinematic_skip_requested = end_reported_intro,
+    on_event_player_trigger = player_trigger,
+    on_event_effect_result = effect_result,
+    on_event_timer_elapsed = function(context, state, event)
+        if talk:handle_timer(context, state, event) then return end
+        if lib.orbit_return_elapsed(context, event) then return end
+        handle(context, state, event)
+    end,
+    on_event_scene_finished = scene_finished,
+    on_event_squad_state = handle,
+    on_event_trigger_entered = handle,
 }
