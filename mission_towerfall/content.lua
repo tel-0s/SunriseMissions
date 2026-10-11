@@ -192,7 +192,112 @@ return function(mission)
     }
 
     -- Dialogue rows (CUE_n). Row 4 is dropped (Dawn); row 6 waits for the first-contact clear.
-    c.lines = {landing = 1, breach = 5, first_contact = 6, civ_run = 7}
+    -- Armory/military: 28 after the weapon, 30 at the post-gun fight, 34 at the hangar window once
+    -- the destroyer exists, 35 at hangar combat, 37 at the corridor exit. 36/38/39 are never sent.
+    c.lines = {landing = 1, breach = 5, first_contact = 6, civ_run = 7,
+        weapon = 28, post_gun = 30, hangar_window = 34, hangar_combat = 35, goto_plaza = 37}
+
+    -- ---- Part 2: armory (still region 72, the Underwatch exit registry) ----------------------
+
+    c.armory = {
+        gun_door = slot("D_GUN_DOOR"),                                  -- 117
+        rack = slot("AUTO_RIFLE_INTERACTABLE"),                         -- 103
+        goal = {directive = directive("FIND_ZAVALA_432D2C96"),         -- objective 2
+            navpoint = slot("AP_GOTO_MILITARY_80B5168C"), waypoint = slot("TV_GOTO_MILITARY")},
+        triggers = {
+            weapon = slot("PT_WEAPON"),
+            post_gun = slot("PT_POSTGUN"),                              -- 169
+            weapon_complete = slot("PT_WEAPON_COMPLETE"),
+            goto_military = slot("PT_GOTO_MILITARY"),
+        },
+        trigger_order = {"weapon", "post_gun", "weapon_complete", "goto_military"},
+    }
+
+    -- ---- Part 3: military / hangar (region 32; the client streams into it on its own) --------
+
+    c.military = {
+        state = state("STATE_80B500BC_0004_0000_80B500B3"),
+        goal = {directive = directive("JOIN_ZAVALA_IN_THE_PLAZA"),     -- objective 4
+            navpoint = slot("SLOT_0008_80B50B91")},
+        gate_start = slot("D_GATING_AMANDA_START"),                     -- 40
+        gate_hangar = slot("D_GATING_AMANDA_HANGAR"),                   -- 41
+        drop_pod = slot("O_CABAL_DROP_POD_MILITARY_HALLWAY"),           -- 2
+        destroyer = slot("CABAL_DESTROYER"),                            -- 0
+        missiles = slots("O_CABAL_MISSILE_1_80B5036A", "O_CABAL_MISSILE_2_80B5036A",
+            "O_CABAL_MISSILE_3_80B5036A", "O_CABAL_MISSILE_4", "O_CABAL_MISSILE_5",
+            "O_CABAL_MISSILE_6"),                                       -- 48-53
+        objective = slot("OBJ_HANGAR"),                                 -- 1
+        triggers = {
+            hangar_spawn = slot("PT_HANGAR_SPAWN"),                     -- 87
+            hangar_combat = slot("PT_HANGAR_COMBAT"),                   -- 96
+            hangar_window = slot("PT_DIALOGUE_HANGAR_WINDOW"),
+            goto_plaza = slot("PT_GOTO_PLAZA_80B50B91"),
+        },
+        trigger_order = {"hangar_spawn", "hangar_combat", "hangar_window", "goto_plaza"},
+        -- The hangar checkpoint. Dawn requests one actor per authored lane; OVERLOOK_B_B carries
+        -- the Legionaries of OVERLOOK_B_C (17), whose authored point is outside the corridor and
+        -- which is never placed.
+        checkpoint = {
+            {squad = squad("SQ_HANGAR_OVERLOOK_A_A"), source = slot("SQ_HANGAR_OVERLOOK_A_A")},           -- 5
+            {squad = squad("SQ_HANGAR_OVERLOOK_A_A_CENT"), source = slot("SQ_HANGAR_OVERLOOK_A_A_CENT")}, -- 6
+            {squad = squad("SQ_HANGAR_OVERLOOK_A_B"), source = slot("SQ_HANGAR_OVERLOOK_A_B")},           -- 7
+            {squad = squad("SQ_HANGAR_OVERLOOK_A_C"), source = slot("SQ_HANGAR_OVERLOOK_A_C")},           -- 8
+            {squad = squad("SQ_HANGAR_OVERLOOK_B_A"), source = slot("SQ_HANGAR_OVERLOOK_B_A")},           -- 11
+            {squad = squad("SQ_FRIENDLIES_EARLY"), source = slot("SQ_FRIENDLIES_EARLY")},                 -- 32
+            {squad = squad("SQ_FRIENDLIES_EARLY_UPPER"), source = slot("SQ_FRIENDLIES_EARLY_UPPER")},     -- 33
+            {squad = squad("SQ_HANGAR_OVERLOOK_B_B"), source = slot("SQ_HANGAR_OVERLOOK_B_B"),
+                counts = {1, 3, 2}},                                                                       -- 13
+            {squad = squad("SQ_HANGAR_OVERLOOK_SNIPER"), source = slot("SQ_HANGAR_OVERLOOK_SNIPER")},     -- 18
+            {squad = squad("SQ_HANGAR_A_A"), source = slot("SQ_HANGAR_A_A")},                             -- 19
+            {squad = squad("SQ_HANGAR_A_A_FLANK"), source = slot("SQ_HANGAR_A_A_FLANK")},                 -- 24
+            {squad = squad("SQ_HANGAR_A_B"), source = slot("SQ_HANGAR_A_B")},                             -- 26
+            {squad = squad("SQ_HANGAR_A_B_SNIPER"), source = slot("SQ_HANGAR_A_B_SNIPER")},               -- 30
+            {squad = squad("SQ_HANGAR_FODDER_A"), source = slot("SQ_HANGAR_FODDER_A")},                   -- 34
+            {squad = squad("SQ_HANGAR_FODDER_B"), source = slot("SQ_HANGAR_FODDER_B")},                   -- 36
+            {squad = squad("SQ_HANGAR_FODDER_C"), source = slot("SQ_HANGAR_FODDER_C")},                   -- 38
+        },
+        -- The hallway Legionary drops with the pod, on Dawn's spawn-rule override (rule 172).
+        hallway = {squad = squad("SQ_MILITARY_HALLWAY_DESTRUCTION"), source = slot("SQ_MILITARY_HALLWAY_DESTRUCTION"),
+            spawn_rule = slot("SR_MILITARY_HALLWAY_DESTRUCTION")},                                         -- 4
+        -- Gate clears. The overlook squad 7 is left out: it fights the allied Frames forever.
+        gate_start_clear = {
+            loose = squads("SQ_MILITARY_HALLWAY_DESTRUCTION", "SQ_HANGAR_OVERLOOK_A_A",
+                "SQ_HANGAR_OVERLOOK_A_A_CENT", "SQ_HANGAR_OVERLOOK_A_C", "SQ_HANGAR_OVERLOOK_B_A"), -- 4, 5, 6, 8, 11
+            scene = {},
+        },
+        gate_hangar_clear = {
+            loose = squads("SQ_HANGAR_OVERLOOK_B_B", "SQ_HANGAR_OVERLOOK_SNIPER"),                  -- 13, 18
+            scene = {},
+        },
+        scene_order = {"cover_a", "cover_b", "cover_c", "throw_a"},
+    }
+
+    -- Part 2-3 scenes. Every cast squad here is cell-less, so all are reserved and none is bound.
+    -- 0x38857CF3 starts the post-gun fight; 0x18EF2ABC is the only key that makes the scene's Cabal
+    -- damageable, so it is sent late, from a trigger: sent before the scene's native wait is
+    -- active it can be lost and leave the Cabal immune.
+    c.heroes.post_gun = {
+        scene = scene("SC_FRAME_COVER_SHOOT_DIE"), slot = slot("SC_FRAME_COVER_SHOOT_DIE"), -- 111
+        entry = 0x38857CF3,
+        reserve = squads("SQ_FRAME_POST_GUN", "SQ_RED_GUARD_POST_GUN", "SQ_RED_GUARD_POST_GUN_JUMP"), -- 112, 114, 115
+        objectives = {
+            {source = slot("SQ_FRAME_POST_GUN"), objective = slot("OBJ_POST_GUN")},
+            {source = slot("SQ_RED_GUARD_POST_GUN"), objective = slot("OBJ_POST_GUN")},
+            {source = slot("SQ_RED_GUARD_POST_GUN_JUMP"), objective = slot("OBJ_POST_GUN")},
+        },                                                                  -- objective 116
+    }
+    -- The military fake fights: no entry key and no objectives; 0x18EF2ABC once, at least 5 s after
+    -- each was staged, when the player reaches the hangar spawn.
+    local function fake_fight(scene_name, frame, cabal)
+        return {scene = scene(scene_name), slot = slot(scene_name), entry_delay_ms = 5000,
+            reserve = squads(frame, cabal)}
+    end
+    c.heroes.cover_a = fake_fight("SC_FRAME_COVER_A", "SQ_FRAME_COVER_A", "SQ_RED_GUARD_FAKE_FIGHT_A") -- 70
+    c.heroes.cover_b = fake_fight("SC_FRAME_COVER_B", "SQ_FRAME_COVER_B", "SQ_RED_GUARD_FAKE_FIGHT_B") -- 72
+    c.heroes.cover_c = fake_fight("SC_FRAME_COVER_C", "SQ_FRAME_COVER_C", "SQ_RED_GUARD_FAKE_FIGHT_C") -- 74
+    c.heroes.throw_a = fake_fight("SC_FRAME_THROW_A", "SQ_FRAME_THROW_A", "SQ_RED_GUARD_THROW_A")     -- 77
+    c.release_key = 0x18EF2ABC
+    c.hero_order_b = {"post_gun", "cover_a", "cover_b", "cover_c", "throw_a"}
 
     return c
 end

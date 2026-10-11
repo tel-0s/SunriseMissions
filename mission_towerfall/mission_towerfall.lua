@@ -141,10 +141,13 @@ local function activate_hero(context, name)
     trace(context, "scene " .. name .. " activated")
 end
 
+local function hero_event(context, name, key, label)
+    context:scene(content.heroes[name].scene):send_event{key = key}
+    trace(context, "scene " .. name .. " " .. label)
+end
+
 local function hero_entry(context, name)
-    local hero = content.heroes[name]
-    context:scene(hero.scene):send_event{key = hero.entry}
-    trace(context, "scene " .. name .. " entry event")
+    hero_event(context, name, content.heroes[name].entry, "entry event")
 end
 
 local function hero_ready_fact(name)
@@ -274,6 +277,203 @@ graph = flow.new{key = "homecoming", facts = facts, steps = {
     end},
 }}
 
+-- ---- parts 2-3: armory and military -----------------------------------------------------------
+-- A second graph: lib.flow keeps at most 64 steps and 64 facts per graph. It starts once Shaxx has
+-- sent the player to gear up.
+
+local armory, military = content.armory, content.military
+
+local function arm_all(context, triggers, order)
+    for _, name in ipairs(order) do arm(context, triggers[name]) end
+end
+
+local function timer_fact(id, timer)
+    return {id = id, observe = function(_, _, event) return event.timer_name == timer end}
+end
+
+local function object_present_fact(id, object)
+    return {id = id, observe = function(context, _, event)
+        return lib.is_slot(context, event, object) and event.present == true
+    end}
+end
+
+local function slot_fact(prefix, name, source)
+    return {id = prefix .. name, observe = function(context, _, event)
+        return lib.is_slot(context, event, source)
+    end}
+end
+
+-- One actor per authored lane unless the member names its own counts (Dawn's request policy).
+local function place_lanes(context, member, objective)
+    context:slot(member.source):assign_combat_objective{objective = context:slot(objective)}
+    local squad = context:squad(member.squad)
+    local counts = squad:counts()
+    for lane = 1, counts.count do
+        counts:set(lane, member.counts ~= nil and member.counts[lane] or 1)
+    end
+    squad:place{counts = counts}
+end
+
+local function device_open(device)
+    return function(context)
+        return context:slot(device):applied{channel = context.sdk.device_channels.position}
+    end
+end
+
+local function open(context, device)
+    context:slot(device):transition{transition = context.sdk.device_transitions.open}
+end
+
+local function close(context, device)
+    context:slot(device):transition{transition = context.sdk.device_transitions.close}
+end
+
+local POST_GUN_MIN = "hc.postgun.min"     -- 18EF2ABC no sooner than 3 s after 38857CF3
+local POD_FALLBACK = "hc.pod.fallback"     -- the pod's presence report, or 5 s
+local DESTROYER_FALLBACK = "hc.destroyer.fallback"
+
+local facts_b = {
+    {id = "military", observe = function(_, _, event)
+        local region = military.state.region_index
+        return (event.previous_region_index ~= nil and event.region_index == region)
+            or (event.entered == true and event.held_region_index == region)
+    end},
+    {id = "rack.used", observe = function(context, _, event)
+        return lib.is_slot(context, event, armory.rack) and event.has_owner == true
+    end},
+    object_present_fact("pod.present", military.drop_pod),
+    object_present_fact("destroyer.present", military.destroyer),
+    timer_fact("postgun.min", POST_GUN_MIN),
+    timer_fact("pod.fallback", POD_FALLBACK),
+    timer_fact("destroyer.fallback", DESTROYER_FALLBACK),
+    settled_fact("gate_start", military.gate_start_clear),
+    settled_fact("gate_hangar", military.gate_hangar_clear),
+}
+for _, name in ipairs(armory.trigger_order) do facts_b[#facts_b + 1] = slot_fact("pt.", name, armory.triggers[name]) end
+for _, name in ipairs(military.trigger_order) do facts_b[#facts_b + 1] = slot_fact("pt.", name, military.triggers[name]) end
+for _, name in ipairs(content.hero_order_b) do facts_b[#facts_b + 1] = hero_ready_fact(name) end
+
+local function scenes_ready(order)
+    local list = {}
+    for index, name in ipairs(order) do list[index] = flow.fact("scene." .. name .. ".ready") end
+    return flow.all(table.unpack(list))
+end
+
+local graph_b = flow.new{key = "homecoming.b", facts = facts_b, steps = {
+    -- A0: the armory opens as soon as Shaxx sends the player to gear up.
+    {id = "armory", await = function(context, state) return graph:started(context, state, "shaxx") end},
+    {id = "armory_open", after = {"armory"}, run = function(context)
+        arm_all(context, armory.triggers, armory.trigger_order)
+        open(context, armory.gun_door)
+        context:slot(armory.rack):set_interactable_object{active = true, used = false, track_owner = true}
+        activate_hero(context, "post_gun")
+    end},
+    -- A1: armory music on the weapon room trigger (stands in for the music volume).
+    {id = "armory_music", after = {"armory_open"}, await = pt("weapon")},
+    {id = "armory_music_on", after = {"armory_music"}, run = function(context, state)
+        music(context, state, content.music.shaxx_door)
+    end},
+    -- Post-gun fight: start it, then release its Cabal from a trigger, late.
+    {id = "post_gun_start", after = {"armory_open"}, await = flow.fact("scene.post_gun.ready")},
+    {id = "post_gun_entry", after = {"post_gun_start"}, run = function(context)
+        hero_entry(context, "post_gun")
+        context:start_timer(POST_GUN_MIN, 3000)
+    end},
+    {id = "post_gun_release", after = {"post_gun_entry"},
+        await = flow.all(flow.any(pt("post_gun"), pt("weapon_complete")), flow.fact("postgun.min"))},
+    {id = "post_gun_released", after = {"post_gun_release"}, run = function(context)
+        hero_event(context, "post_gun", content.release_key, "release event")
+    end},
+    -- A2: the evacuation announcement.
+    {id = "post_gun_line", after = {"armory_open"}, await = pt("post_gun")},
+    {id = "post_gun_said", after = {"post_gun_line"}, run = function(context, state)
+        talk:say(context, state, content.lines.post_gun)
+    end},
+    -- A3: the rifle. No weapon grant exists in Sunrise, so an owned report from the rack or the
+    -- weapon-complete trigger ends the step; the player keeps their loadout.
+    {id = "weapon", after = {"armory_open"}, await = flow.any(flow.fact("rack.used"), pt("weapon_complete"))},
+    {id = "weapon_taken", after = {"weapon"}, run = function(context, state)
+        context:slot(armory.rack):set_interactable_object{active = false, used = true}
+        talk:say(context, state, content.lines.weapon)
+        show(context, armory.goal)
+    end},
+    -- A4: leaving the armory.
+    {id = "armory_exit", after = {"weapon_taken", "post_gun_released"}, await = pt("goto_military")},
+
+    -- M0: military. Goal, both Amanda gates shut, triggers, the hangar checkpoint, the fake fights.
+    {id = "military", after = {"armory_open"}, await = flow.fact("military")},
+    {id = "military_enter", after = {"military"}, run = function(context)
+        show(context, military.goal)
+        close(context, military.gate_start)
+        close(context, military.gate_hangar)
+        arm_all(context, military.triggers, military.trigger_order)
+        for _, member in ipairs(military.checkpoint) do place_lanes(context, member, military.objective) end
+        for _, name in ipairs(military.scene_order) do activate_hero(context, name) end
+        trace(context, "military entered")
+    end},
+    -- M1-M2: the drop pod lands, then the hallway Legionary comes out of it.
+    {id = "pod", after = {"military_enter"}, await = pt("hangar_spawn")},
+    {id = "pod_drop", after = {"pod"}, run = function(context)
+        context:slot(military.drop_pod):set_object_active{active = true}
+        context:start_timer(POD_FALLBACK, 5000)
+    end},
+    {id = "pod_landed", after = {"pod_drop"}, await = flow.any(flow.fact("pod.present"), flow.fact("pod.fallback"))},
+    {id = "pod_legionary", after = {"pod_landed"}, run = function(context, state)
+        local hallway = military.hallway
+        context:slot(hallway.source):assign_combat_objective{objective = context:slot(military.objective)}
+        context:squad(hallway.squad):place{spawn_rule = context:slot(hallway.spawn_rule)}
+        music(context, state, content.music.first_pod)
+    end},
+    -- The fake fights' Cabal become damageable when the player reaches the hangar spawn.
+    {id = "fake_fights", after = {"military_enter"},
+        await = flow.all(pt("hangar_spawn"), scenes_ready(military.scene_order))},
+    {id = "fake_fights_released", after = {"fake_fights"}, run = function(context)
+        for _, name in ipairs(military.scene_order) do
+            hero_event(context, name, content.release_key, "release event")
+        end
+    end},
+    -- M3-M6: gate 40 when the overlook is down, gate 41 when the far overlook is down.
+    {id = "gate_start_down", after = {"pod_legionary"}, await = down(military.gate_start_clear)},
+    {id = "gate_start_settle", after = {"gate_start_down"}, run = function(context)
+        context:start_timer(settle_timer("gate_start"), SETTLE_MS)
+    end, await = flow.fact("settled.gate_start")},
+    {id = "gate_start_open", after = {"gate_start_settle"}, run = function(context)
+        open(context, military.gate_start)
+    end, await = device_open(military.gate_start)},
+    {id = "gate_hangar_down", after = {"gate_start_open"}, await = down(military.gate_hangar_clear)},
+    {id = "gate_hangar_settle", after = {"gate_hangar_down"}, run = function(context)
+        context:start_timer(settle_timer("gate_hangar"), SETTLE_MS)
+    end, await = flow.fact("settled.gate_hangar")},
+    {id = "gate_hangar_open", after = {"gate_hangar_settle"}, run = function(context)
+        open(context, military.gate_hangar)
+    end, await = device_open(military.gate_hangar)},
+    -- M7-M8: the destroyer, then its missiles.
+    {id = "destroyer", after = {"gate_hangar_open"}, run = function(context)
+        context:slot(military.destroyer):set_object_active{active = true}
+        context:start_timer(DESTROYER_FALLBACK, 5000)
+    end, await = flow.any(flow.fact("destroyer.present"), flow.fact("destroyer.fallback"))},
+    {id = "missiles", after = {"destroyer"}, run = function(context)
+        context:activate_objects{slots = military.missiles, active = true}
+    end},
+    -- M9: the hangar window line needs the window and the ship.
+    {id = "window_line", after = {"destroyer"}, await = pt("hangar_window")},
+    {id = "window_said", after = {"window_line"}, run = function(context, state)
+        talk:say(context, state, content.lines.hangar_window)
+    end},
+    -- M10: hangar combat: line and the ship-reveal music.
+    {id = "hangar_combat", after = {"military_enter"}, await = pt("hangar_combat")},
+    {id = "hangar_combat_on", after = {"hangar_combat"}, run = function(context, state)
+        talk:say(context, state, content.lines.hangar_combat)
+        music(context, state, content.music.cabal_ship_reveal)
+    end},
+    -- M11: out toward the plaza: needs gate 41 open (pt_skip_hangar overlaps the exit trigger).
+    {id = "goto_plaza", after = {"gate_hangar_open", "fake_fights_released"}, await = pt("goto_plaza")},
+    {id = "military_done", after = {"goto_plaza"}, run = function(context, state)
+        talk:say(context, state, content.lines.goto_plaza)
+        trace(context, "military complete; the plaza is not scripted yet")
+    end},
+}}
+
 -- ---- intro -------------------------------------------------------------------------------------
 
 -- The client holds the cutscene region, so only its start is owed. The spawn is held through the
@@ -303,6 +503,12 @@ end
 
 local function handle(context, state, event)
     graph:handle(context, state, event)
+    graph_b:handle(context, state, event)
+end
+
+local function advance(context, state)
+    graph:advance(context, state)
+    graph_b:advance(context, state)
 end
 
 local function player_trigger(context, state, event)
@@ -315,9 +521,8 @@ end
 
 -- A hero activation reaching transport starts its entry timer; a refusal is logged and starts it
 -- anyway, so the steps after the scene still run.
-local function effect_result(context, state, event)
-    if event.request_key == nil then return end
-    for _, name in ipairs(content.hero_order) do
+local function hero_activation_result(context, state, event, order)
+    for _, name in ipairs(order) do
         local key = hero_request_key(name)
         local pending = state:variable(key)
         if pending ~= nil and event.request_key.value == pending then
@@ -325,10 +530,17 @@ local function effect_result(context, state, event)
             if event.outcome ~= "transport_staged" then
                 trace(context, "scene " .. name .. " activation " .. tostring(event.outcome))
             end
-            context:start_timer(hero_timer(name), SCENE_ENTRY_MS)
-            return
+            context:start_timer(hero_timer(name), content.heroes[name].entry_delay_ms or SCENE_ENTRY_MS)
+            return true
         end
     end
+    return false
+end
+
+local function effect_result(context, state, event)
+    if event.request_key == nil then return end
+    if hero_activation_result(context, state, event, content.hero_order) then return end
+    hero_activation_result(context, state, event, content.hero_order_b)
 end
 
 local function scene_finished(context, state, event)
@@ -346,13 +558,13 @@ return {
     },
     on_start = function(context, state)
         context:hold_spawn{active = true}
-        graph:advance(context, state)
+        advance(context, state)
     end,
     -- A reattach lands in the world, so a cutscene still marked playing is ended, not replayed.
     on_load = function(context, state)
         end_intro(context, state)
         talk:resume(context, state)
-        graph:advance(context, state)
+        advance(context, state)
     end,
     on_event_region_changed = function(context, state, event)
         start_intro(context, state, event.region_index)
@@ -377,4 +589,7 @@ return {
     on_event_scene_finished = scene_finished,
     on_event_squad_state = handle,
     on_event_trigger_entered = handle,
+    on_event_object_state = handle,
+    on_event_object_interacted = handle,
+    on_event_device_state = handle,
 }
