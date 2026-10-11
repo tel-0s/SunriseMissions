@@ -592,9 +592,12 @@ local graph_c = flow.new{key = "homecoming.c", facts = facts_c, steps = {
         hero_entry(context, "zavala_arrival")
         wait(context, "arrival_fallback", plaza.arrival_fallback_ms)
     end},
-    -- P6-P8: the Traveler line; the Cabal ship appears when that line actually plays.
+    -- P6-P8: the Traveler line; the Cabal ship appears when that line actually plays. The plaza is
+    -- an authored public bubble, and its trigger reports reach the mission only through the
+    -- runtime's public-link forward. Without it, Zavala's arrival stands in for the triggers.
     {id = "traveler", after = {"plaza_arrival"},
-        await = flow.any(pt("military_500"), pt("goto_plaza"), pt("spawn_init"), pt("meet"))},
+        await = flow.any(pt("military_500"), pt("goto_plaza"), pt("spawn_init"), pt("meet"),
+            flow.fact("scene.zavala_arrival.ready"))},
     {id = "traveler_line", after = {"traveler"}, run = function(context, state)
         talk:say(context, state, content.lines.traveler)
     end},
@@ -602,8 +605,9 @@ local graph_c = flow.new{key = "homecoming.c", facts = facts_c, steps = {
     {id = "cabal_ship_on", after = {"cabal_ship"}, run = function(context)
         set_active(context, {plaza.cabal_ship}, true)
     end},
-    -- P9-P10: meeting Zavala.
-    {id = "meet", after = {"plaza_arrival"}, await = pt("meet")},
+    -- P9-P10: meeting Zavala, or his arrival ending if the meet trigger never reports.
+    {id = "meet", after = {"plaza_arrival"},
+        await = flow.any(pt("meet"), waited("arrival_kills"), waited("arrival_fallback"))},
     {id = "meet_on", after = {"meet"}, run = function(context, state)
         set_active(context, {plaza.zavala_pinned}, false)
         set_active(context, {plaza.zavala_grenade}, true)
@@ -849,9 +853,9 @@ local graphs = {graph, graph_b, graph_c, graph_d}
 
 -- Triggers armed on a region change can race the region's object groups, which the server
 -- publishes over the next few hundred milliseconds: a group published after the arm resets it.
--- The plaza lost all four triggers that way in playtest 1. So each region's triggers are armed again
--- shortly after entry, and again on a script reload once the region is entered. A trigger that
--- already reported just reports again; its fact is already latched.
+-- So each region's triggers are armed again shortly after entry, and again on a script reload once
+-- the region is entered. A trigger that already reported just reports again; its fact is already
+-- latched.
 local REARM = {
     {id = "military", graph = graph_b, fact = "military", triggers = military.triggers, order = military.trigger_order},
     {id = "plaza", graph = graph_c, fact = "plaza", triggers = plaza.triggers, order = plaza.trigger_order},
