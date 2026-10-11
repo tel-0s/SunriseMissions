@@ -302,5 +302,155 @@ return function(mission)
     c.release_key = 0x18EF2ABC
     c.hero_order_b = {"post_gun", "cover_a", "cover_b", "cover_c", "throw_a"}
 
+    -- ---- Part 4: the plaza (region 48; the client streams into it) --------------------------
+    -- Dawn graphs 4 ("Plaza") and 5 ("Plaza assaults"). Zavala is one actor cell
+    -- (SQ_ZAVALA_BANSHEE) reused by all four plaza scenes, so a scene is stopped before the next one
+    -- activates, with a short stagger. Completions the script cannot observe (Zavala's arrival
+    -- kills, each Ward, the strike, the revival animation) are timers or proxies.
+
+    c.lines.traveler = 40       -- the Traveler sighting; the Cabal ship prop appears when it plays
+    c.lines.meet = 50
+    c.lines.first_assault = 52
+    c.lines.ward_1 = 53
+    c.lines.second_assault = 51
+    c.lines.second_clear = 55
+    c.lines.ward_2 = 57        -- only once row 55 has finished
+    c.lines.zavala_down = 47
+    c.lines.last_assault = 54
+    c.lines.held = 59
+
+    local function wave(objective, ...)
+        local out = {}
+        for index, entry in ipairs({...}) do
+            out[index] = {squad = squad(entry[1]), source = slot(entry[1]), counts = entry[2]}
+        end
+        return {members = out, objective = objective}
+    end
+
+    c.plaza = {
+        state = state("STATE_80B500BC_0006_0000_80B500B6"),
+        goals = {
+            fight = {directive = directive("FIGHT_WITH_ZAVALA"), navpoint = slot("AP_PLAZA")},     -- objective 5
+            assaults = directive("ASSAULTS_REPELLED"),                                          -- objective 7
+            leave = {directive = directive("LEAVE_THE_PLAZA_AND_FIND_THE_SPEAKER_E68735ED"),
+                navpoint = slot("SLOT_000E_80B51058")},                                         -- objective 9
+        },
+        triggers = {
+            military_500 = slot("PT_TOWERFALL_MILITARY_500"),   -- shares its polygon with the tv_dialog volume
+            goto_plaza = slot("PT_GOTO_PLAZA_80B51058"),
+            spawn_init = slot("PT_PLAZA_SPAWN_INIT"),
+            meet = slot("PT_PLAZA_ZAVALA_MEET"),
+            goto_boulevard = slot("PT_GOTO_BOULEVARD"),         -- armed only once the plaza is held
+        },
+        trigger_order = {"military_500", "goto_plaza", "spawn_init", "meet"},
+        -- Off on arrival. BUBBLE_SHIELD_1 is a second, premature Ward: it is never turned on.
+        off_on_arrival = slots("BUBBLE_SHIELD_1", "O_ROCKET_KILLS_ZAVALA", "O_DEAD_ZAVALA_INTERACT",
+            "O_DEAD_ZAVALA_GHOST", "O_MISSILE_SPAWNER", "O_MISSILE_SPAWNER_SCRIPT"),
+        bubble_shield = slot("BUBBLE_SHIELD_1"),
+        skybox = slots("OP_ZAVALA_PINNED", "SPECOPS_PLAZA_SHIP_BATTLE_O_DO_SHIP_5",
+            "SPECOPS_PLAZA_SHIP_BATTLE_O_DO_SHIP_0", "SPECOPS_PLAZA_SHIP_BATTLE_O_DO_SHIP_1",
+            "SPECOPS_PLAZA_SHIP_BATTLE_O_DO_SHIP_2", "SPECOPS_PLAZA_SHIP_BATTLE_O_DO_SHIP_3",
+            "SPECOPS_PLAZA_SHIP_BATTLE_O_DO_SHIP_4", "SPECOPS_PLAZA_SHIP_BATTLE_O_DO_SHIP_6",
+            "SPECOPS_PLAZA_SHIP_BATTLE_O_DO_SHIP_7", "SPECOPS_PLAZA_SHIP_BATTLE_O_DO_SHIP_LEFT_0",
+            "SPECOPS_PLAZA_SHIP_BATTLE_O_DO_SHIP_LEFT_1", "SPECOPS_PLAZA_SHIP_BATTLE_O_DO_SHIP_LEFT_2"),
+        cabal_ship = slot("SPECOPS_PLAZA_SHIP_BATTLE_O_CABAL_SHIP"),
+        zavala_pinned = slot("OP_ZAVALA_PINNED"),
+        zavala_grenade = slot("O_ZAVALA_GRENADE_1"),
+        orb_spawner = slot("O_ORB_SPAWNER"),
+        rocket = slot("O_ROCKET_KILLS_ZAVALA"),
+        missile_spawner = slot("O_MISSILE_SPAWNER"),
+        missile_script = slots("O_ROCKET_KILLS_ZAVALA", "O_MISSILE_SPAWNER", "O_MISSILE_SPAWNER_SCRIPT"),
+        missile_device = slot("D_MISSILE_SPAWNER_SCRIPT"),
+        dead_interact = slot("O_DEAD_ZAVALA_INTERACT"),
+        dead_ghost = slot("O_DEAD_ZAVALA_GHOST"),
+        dead_ghost_device = slot("D_DEAD_ZAVALA_GHOST"),
+        zavala_cell = slot("SQ_ZAVALA_BANSHEE"),
+        zavala = squad("SQ_ZAVALA"),
+        carriers_first = {
+            objects = slots("O_CABAL_CARRIER_L_80B5103A", "O_CABAL_CARRIER_R_80B5103A"),
+            devices = slots("D_CABAL_CARRIER_L_80B5103A", "D_CABAL_CARRIER_R_80B5103A"),
+        },
+        carriers_last = {
+            objects = slots("O_CABAL_CARRIER_B", "O_CABAL_CARRIER_FAR_A", "O_CABAL_CARRIER_FAR_A_1",
+                "O_CABAL_CARRIER_FAR_A_2", "O_CABAL_CARRIER_FAR_B", "O_CABAL_CARRIER_FAR_B_1",
+                "O_CABAL_CARRIER_FAR_B_2", "O_CABAL_CARRIER_FAR_C", "O_CABAL_CARRIER_FAR_C_1",
+                "O_CABAL_CARRIER_FAR_C_2"),
+            devices = slots("D_CABAL_CARRIER_B", "D_CABAL_CARRIER_FAR_A", "D_CABAL_CARRIER_FAR_A_1",
+                "D_CABAL_CARRIER_FAR_A_2", "D_CABAL_CARRIER_FAR_B", "D_CABAL_CARRIER_FAR_B_1",
+                "D_CABAL_CARRIER_FAR_B_2", "D_CABAL_CARRIER_FAR_C", "D_CABAL_CARRIER_FAR_C_1",
+                "D_CABAL_CARRIER_FAR_C_2"),
+        },
+        -- Zavala kills these in his arrival branch (0x1BED1ED3); all at 0 stands in for its end.
+        arrival_kills = squads("SQUAD_KILL_CABAL_5", "SQUAD_KILL_CABAL_6", "SQUAD_KILL_CABAL_7",
+            "SQUAD_KILL_CABAL_8"),
+        -- Waves with Dawn's lane counts. SQ_PLAZA_REINFORCE_A_C's lane 1 has no actor class in the
+        -- SDK, so only its lane 2 is requested.
+        init = wave(slot("OBJ_PLAZA_KILL_CABAL"), {"SQUAD_KILL_CABAL_3", {1}}, {"SQUAD_KILL_CABAL_4", {1}},
+            {"SQUAD_CABAL_DROPOFF_1", {1}}),
+        first = wave(slot("OBJ_PLAZA_REINFORCE"), {"SQ_PLAZA_REINFORCE_START_A", {1}},
+            {"SQ_PLAZA_REINFORCE_START_B", {3}}, {"SQ_PLAZA_INTERIM_A_A", {3}}, {"SQ_PLAZA_INTERIM_A_B", {3}}),
+        second = wave(slot("OBJ_PLAZA_REINFORCE"), {"SQ_PLAZA_REINFORCE_A_A_EXTRA", {4}},
+            {"SQ_PLAZA_REINFORCE_A_C", {0, 1}}, {"SQ_PLAZA_REINFORCE_A_D", {3}},
+            {"SQ_PLAZA_REINFORCE_A_D_EXTRA", {3}}),
+        last = wave(slot("OBJ_PLAZA_REINFORCE"), {"SQ_PLAZA_REINFORCE_B_A", {3}},
+            {"SQ_PLAZA_REINFORCE_B_A_EXTRA", {3}}, {"SQ_PLAZA_REINFORCE_B_B", {3}},
+            {"SQ_PLAZA_REINFORCE_B_B_EXTRA", {3}}),
+        -- Timings the script cannot observe. Ward from PR #8 (the performer casts at 5.3 s); the rest
+        -- are estimates to tune in playtests.
+        ward_ms = 12000,
+        strike_ms = 10000,
+        arrival_fallback_ms = 15000,
+        revive_fallback_ms = 20000,
+        revival_ms = 6000,
+        revival_fallback_ms = 10000,
+        stagger_ms = 500,
+    }
+    local function loose(w)
+        local out = {}
+        for index, member in ipairs(w.members) do out[index] = member.squad end
+        return {loose = out, scene = {}}
+    end
+    c.plaza.init_clear = loose(c.plaza.init)
+    c.plaza.first_clear = loose(c.plaza.first)
+    c.plaza.second_clear = loose(c.plaza.second)
+    c.plaza.last_clear = loose(c.plaza.last)
+
+    -- Plaza scenes. Zavala's cell is bound for his own scene; the others reuse the cast pairing.
+    -- Never an objective on SQ_ZAVALA, never place{} a scene squad.
+    local kill = slot("OBJ_PLAZA_KILL_CABAL")
+    local reinforce = slot("OBJ_PLAZA_REINFORCE")
+    c.heroes.zavala_arrival = {
+        scene = scene("SC_ZAVALA"), slot = slot("SC_ZAVALA"),
+        entry = 0xB8C5C0A5, extra = {0x1BED1ED3},
+        bind = slots("SQ_ZAVALA_BANSHEE"),
+        reserve = squads("SQUAD_KILL_CABAL_5", "SQUAD_KILL_CABAL_6", "SQUAD_KILL_CABAL_7", "SQUAD_KILL_CABAL_8"),
+        objectives = {
+            {source = slot("SQUAD_KILL_CABAL_5"), objective = kill}, {source = slot("SQUAD_KILL_CABAL_6"), objective = kill},
+            {source = slot("SQUAD_KILL_CABAL_7"), objective = kill}, {source = slot("SQUAD_KILL_CABAL_8"), objective = kill},
+        },
+    }
+    c.heroes.combat_1 = {
+        scene = scene("SC_ZAVALA_COMBAT"), slot = slot("SC_ZAVALA_COMBAT"),
+        reserve = squads("SQUAD_KILL_CABAL_1", "SQUAD_KILL_CABAL_2", "SQ_PLAZA_REINFORCE_A_A", "SQ_PLAZA_REINFORCE_A_B"),
+        objectives = {
+            {source = slot("SQUAD_KILL_CABAL_1"), objective = kill}, {source = slot("SQUAD_KILL_CABAL_2"), objective = kill},
+            {source = slot("SQ_PLAZA_REINFORCE_A_A"), objective = reinforce},
+            {source = slot("SQ_PLAZA_REINFORCE_A_B"), objective = reinforce},
+        },
+    }
+    c.heroes.combat_2 = {scene = scene("SC_ZAVALA_COMBAT"), slot = slot("SC_ZAVALA_COMBAT")}
+    c.heroes.combat_3 = {scene = scene("SC_ZAVALA_COMBAT"), slot = slot("SC_ZAVALA_COMBAT")}
+    c.heroes.ward_1 = {scene = scene("SC_ZAVALA_BUNKER_SHIELD_BUNKER"), slot = slot("SC_ZAVALA_BUNKER_SHIELD_BUNKER"),
+        entry = 0xC021F76C}
+    c.heroes.ward_2 = {scene = scene("SC_ZAVALA_BUNKER_SHIELD_BUNKER"), slot = slot("SC_ZAVALA_BUNKER_SHIELD_BUNKER"),
+        entry = 0xC021F76C}
+    c.heroes.death = {scene = scene("SC_ZAVALA_SHIELD_DEATH"), slot = slot("SC_ZAVALA_SHIELD_DEATH"),
+        entry = 0xC021F76F}
+    -- The revival: only 0xB8C5C0A5. 0x1BED1ED3 would replay the four scripted kills.
+    c.heroes.revival = {scene = scene("SC_ZAVALA"), slot = slot("SC_ZAVALA"),
+        entry = 0xB8C5C0A5, bind = slots("SQ_ZAVALA_BANSHEE")}
+    c.hero_order_c = {"zavala_arrival", "combat_1", "ward_1"}
+    c.hero_order_d = {"combat_2", "ward_2", "death", "revival", "combat_3"}
+
     return c
 end

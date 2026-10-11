@@ -36,6 +36,7 @@ local function show(context, goal)
     context:slot(content.sensors.directive):set_directive{
         directive = goal.directive,
         state = goal.state,
+        progress = goal.progress,
         navpoint = goal.navpoint ~= nil and context:slot(goal.navpoint) or nil,
         waypoint = goal.waypoint ~= nil and context:slot(goal.waypoint) or nil,
     }
@@ -148,6 +149,7 @@ end
 
 local function hero_entry(context, name)
     hero_event(context, name, content.heroes[name].entry, "entry event")
+    for _, key in ipairs(content.heroes[name].extra or {}) do hero_event(context, name, key, "extra event") end
 end
 
 local function hero_ready_fact(name)
@@ -309,7 +311,8 @@ local function place_lanes(context, member, objective)
     local squad = context:squad(member.squad)
     local counts = squad:counts()
     for lane = 1, counts.count do
-        counts:set(lane, member.counts ~= nil and member.counts[lane] or 1)
+        -- Named counts cover only the lanes Dawn requests; other lanes stay empty.
+        counts:set(lane, member.counts ~= nil and (member.counts[lane] or 0) or 1)
     end
     squad:place{counts = counts}
 end
@@ -482,6 +485,331 @@ local graph_b = flow.new{key = "homecoming.b", facts = facts_b, steps = {
     end},
 }}
 
+-- ---- part 4: the plaza -------------------------------------------------------------------------
+-- Two graphs, after Dawn's graphs 4 (arrival, first assault, first Ward) and 5 (the later assaults,
+-- Zavala's death and revive, the plaza held).
+
+local plaza = content.plaza
+
+local function set_active(context, slots, active)
+    context:activate_objects{slots = slots, active = active}
+end
+
+local function open_all(context, devices)
+    for _, device in ipairs(devices) do open(context, device) end
+end
+
+local function stop_hero(context, name)
+    context:scene(content.heroes[name].scene):stop{}
+    trace(context, "scene " .. name .. " stopped")
+end
+
+local function place_wave(context, w)
+    for _, member in ipairs(w.members) do place_lanes(context, member, w.objective) end
+end
+
+local function assaults(context, done)
+    show(context, {directive = plaza.goals.assaults, progress = {done, 3}})
+end
+
+-- Short timers named per graph: "hc.t.<id>", observed as fact "t.<id>".
+local function wait(context, id, ms) context:start_timer("hc.t." .. id, ms) end
+local function waited(id) return flow.fact("t." .. id) end
+local function wait_facts(list, ids)
+    for _, id in ipairs(ids) do list[#list + 1] = timer_fact("t." .. id, "hc.t." .. id) end
+end
+
+local function hero_facts(list, order)
+    for _, name in ipairs(order) do list[#list + 1] = hero_ready_fact(name) end
+end
+
+local function region_fact(id, region_state)
+    return {id = id, observe = function(_, _, event)
+        local region = region_state.region_index
+        return (event.previous_region_index ~= nil and event.region_index == region)
+            or (event.entered == true and event.held_region_index == region)
+    end}
+end
+
+local function played(row)
+    return function(_, state) return talk:played(state, row) end
+end
+
+-- "Row n has played and nothing is speaking": the dialogue queue's window timer is not running.
+local function finished_speaking(row)
+    return function(_, state)
+        return talk:played(state, row) and state:timer("dlg." .. KEY .. ".window") == nil
+    end
+end
+
+local function zero_alive(squads)
+    return function(context)
+        for _, squad in ipairs(squads) do
+            local alive = context:cohort{squads = {squad}}.alive_count
+            if alive == nil or alive > 0 then return false end
+        end
+        return true
+    end
+end
+
+local facts_c = {
+    region_fact("plaza", plaza.state),
+    settled_fact("plaza_init", plaza.init_clear),
+    settled_fact("plaza_first", plaza.first_clear),
+}
+for _, name in ipairs({"military_500", "goto_plaza", "spawn_init", "meet"}) do
+    facts_c[#facts_c + 1] = slot_fact("pt.", name, plaza.triggers[name])
+end
+hero_facts(facts_c, content.hero_order_c)
+wait_facts(facts_c, {"arrival_fallback", "arrival_kills", "combat_1", "ward_1_stagger", "ward_1_held"})
+
+local graph_c = flow.new{key = "homecoming.c", facts = facts_c, steps = {
+    {id = "plaza", await = flow.all(function(context, state) return graph_b:started(context, state, "military_done") end,
+        flow.fact("plaza"))},
+    -- P0-P2: arrival. The goal, music, Zavala's scripted objects off, triggers, the skybox battle.
+    {id = "plaza_arrival", after = {"plaza"}, run = function(context, state)
+        show(context, plaza.goals.fight)
+        music(context, state, content.music.plaza)
+        set_active(context, plaza.off_on_arrival, false)
+        arm_all(context, plaza.triggers, plaza.trigger_order)
+        set_active(context, plaza.skybox, true)
+        trace(context, "plaza entered")
+    end},
+    -- P3-P5: Zavala arrives with the opening Cabal; his entry also plays his four scripted kills.
+    {id = "zavala_arrival", after = {"plaza_arrival"}, run = function(context)
+        place_wave(context, plaza.init)
+        activate_hero(context, "zavala_arrival")
+    end, await = flow.fact("scene.zavala_arrival.ready")},
+    {id = "zavala_arrival_entry", after = {"zavala_arrival"}, run = function(context)
+        hero_entry(context, "zavala_arrival")
+        wait(context, "arrival_fallback", plaza.arrival_fallback_ms)
+    end},
+    -- P6-P8: the Traveler line; the Cabal ship appears when that line actually plays.
+    {id = "traveler", after = {"plaza_arrival"},
+        await = flow.any(pt("military_500"), pt("goto_plaza"), pt("spawn_init"), pt("meet"))},
+    {id = "traveler_line", after = {"traveler"}, run = function(context, state)
+        talk:say(context, state, content.lines.traveler)
+    end},
+    {id = "cabal_ship", after = {"traveler_line"}, await = played(content.lines.traveler)},
+    {id = "cabal_ship_on", after = {"cabal_ship"}, run = function(context)
+        set_active(context, {plaza.cabal_ship}, true)
+    end},
+    -- P9-P10: meeting Zavala.
+    {id = "meet", after = {"plaza_arrival"}, await = pt("meet")},
+    {id = "meet_on", after = {"meet"}, run = function(context, state)
+        set_active(context, {plaza.zavala_pinned}, false)
+        set_active(context, {plaza.zavala_grenade}, true)
+        talk:say(context, state, content.lines.meet)
+    end},
+    -- P11: the arrival is over when his four kills are dead (plus 3 s), or after the fallback.
+    {id = "arrival_kills", after = {"zavala_arrival_entry"}, await = zero_alive(plaza.arrival_kills)},
+    {id = "arrival_kills_settle", after = {"arrival_kills"}, run = function(context)
+        wait(context, "arrival_kills", SETTLE_MS)
+    end},
+    {id = "arrival_done", after = {"zavala_arrival_entry"},
+        await = flow.any(waited("arrival_kills"), waited("arrival_fallback"))},
+    -- P12: Zavala fights. His arrival scene stops first; the combat scene follows a beat later.
+    {id = "combat_1_stop", after = {"meet_on", "arrival_done"}, run = function(context)
+        stop_hero(context, "zavala_arrival")
+        wait(context, "combat_1", plaza.stagger_ms)
+    end, await = waited("combat_1")},
+    {id = "combat_1", after = {"combat_1_stop"}, run = function(context)
+        activate_hero(context, "combat_1")
+    end},
+    -- P13-P15: the opening Cabal down, then the first assault with its carriers.
+    {id = "plaza_init_down", after = {"combat_1"}, await = down(plaza.init_clear)},
+    {id = "plaza_init_settle", after = {"plaza_init_down"}, run = function(context)
+        context:start_timer(settle_timer("plaza_init"), SETTLE_MS)
+    end, await = flow.fact("settled.plaza_init")},
+    {id = "first_assault", after = {"plaza_init_settle"}, run = function(context, state)
+        assaults(context, 0)
+        talk:say(context, state, content.lines.first_assault)
+        set_active(context, {plaza.orb_spawner}, true)
+        place_wave(context, plaza.first)
+        set_active(context, plaza.carriers_first.objects, true)
+        open_all(context, plaza.carriers_first.devices)
+    end},
+    -- P16-P17: first assault repelled.
+    {id = "first_down", after = {"first_assault"}, await = down(plaza.first_clear)},
+    {id = "first_settle", after = {"first_down"}, run = function(context)
+        context:start_timer(settle_timer("plaza_first"), SETTLE_MS)
+    end, await = flow.fact("settled.plaza_first")},
+    -- P18-P21: the first barrage and Zavala's Ward of Dawn. The scene's own performer casts the
+    -- shield; BUBBLE_SHIELD_1 stays off.
+    {id = "ward_1_stop", after = {"first_settle"}, run = function(context, state)
+        assaults(context, 1)
+        talk:say(context, state, content.lines.ward_1)
+        stop_hero(context, "combat_1")
+        set_active(context, plaza.missile_script, false)
+        context:slot(plaza.missile_device):transition{transition = context.sdk.device_transitions.power_off}
+        wait(context, "ward_1_stagger", plaza.stagger_ms)
+    end, await = waited("ward_1_stagger")},
+    {id = "ward_1", after = {"ward_1_stop"}, run = function(context)
+        activate_hero(context, "ward_1")
+    end, await = flow.fact("scene.ward_1.ready")},
+    {id = "ward_1_entry", after = {"ward_1"}, run = function(context)
+        hero_entry(context, "ward_1")
+        wait(context, "ward_1_held", plaza.ward_ms)
+    end, await = waited("ward_1_held")},
+    -- P22: the Ward drops as the second assault comes.
+    {id = "ward_1_over", after = {"ward_1_entry"}, run = function(context)
+        set_active(context, {plaza.bubble_shield}, false)
+        stop_hero(context, "ward_1")
+    end},
+}}
+
+-- Zavala struck: the rocket object, once seen present, reports gone.
+local ROCKET_SEEN = "hc.plaza.rocket_seen"
+-- The revive interactable: open seen, so a later close counts as the use.
+local REVIVE_OPEN = "hc.plaza.revive_open"
+
+local facts_d = {
+    settled_fact("plaza_second", plaza.second_clear),
+    settled_fact("plaza_last", plaza.last_clear),
+    slot_fact("pt.", "goto_boulevard", plaza.triggers.goto_boulevard),
+    {id = "rocket.gone", observe = function(context, state, event)
+        if not lib.is_slot(context, event, plaza.rocket) then return false end
+        if event.present == true and event.alive ~= false then
+            context:set_variable(ROCKET_SEEN, true)
+            return false
+        end
+        return state:variable(ROCKET_SEEN) == true
+    end},
+    -- The revive: an owned report, the interaction closing after it was open, the interactable or
+    -- the Ghost gone, or the fallback timer (interaction holds have not reported in playtests).
+    {id = "revive.used", observe = function(context, state, event)
+        if lib.is_slot(context, event, plaza.dead_interact) then
+            if event.has_owner == true or event.present == false then return true end
+            if event.interaction_open == true then context:set_variable(REVIVE_OPEN, true) end
+            return event.interaction_open == false and state:variable(REVIVE_OPEN) == true
+        end
+        return lib.is_slot(context, event, plaza.dead_ghost) and event.present == false
+    end},
+}
+hero_facts(facts_d, content.hero_order_d)
+wait_facts(facts_d, {"combat_2", "ward_2_stagger", "ward_2_held", "death_stagger", "strike",
+    "revive_fallback", "revival_stagger", "revival_anim", "revival_fallback", "combat_3"})
+
+local function zavala_back(context)
+    local alive = context:cohort{squads = {plaza.zavala}}.alive_count
+    return alive ~= nil and alive > 0
+end
+
+local graph_d = flow.new{key = "homecoming.d", facts = facts_d, steps = {
+    {id = "assaults", await = function(context, state) return graph_c:started(context, state, "ward_1_over") end},
+    -- W0: the second assault.
+    {id = "combat_2_wait", after = {"assaults"}, run = function(context)
+        wait(context, "combat_2", plaza.stagger_ms)
+    end, await = waited("combat_2")},
+    {id = "second_assault", after = {"combat_2_wait"}, run = function(context, state)
+        activate_hero(context, "combat_2")
+        talk:say(context, state, content.lines.second_assault)
+        place_wave(context, plaza.second)
+    end},
+    -- W1-W2: repelled.
+    {id = "second_down", after = {"second_assault"}, await = down(plaza.second_clear)},
+    {id = "second_settle", after = {"second_down"}, run = function(context)
+        context:start_timer(settle_timer("plaza_second"), SETTLE_MS)
+    end, await = flow.fact("settled.plaza_second")},
+    {id = "second_repelled", after = {"second_settle"}, run = function(context, state)
+        assaults(context, 2)
+        talk:say(context, state, content.lines.second_clear)
+    end},
+    -- W3-W4: the second barrage, once row 55 has finished.
+    {id = "ward_2_stop", after = {"second_repelled"}, await = finished_speaking(content.lines.second_clear),
+        run = nil},
+    {id = "ward_2_begin", after = {"ward_2_stop"}, run = function(context, state)
+        talk:say(context, state, content.lines.ward_2)
+        stop_hero(context, "combat_2")
+        wait(context, "ward_2_stagger", plaza.stagger_ms)
+    end, await = waited("ward_2_stagger")},
+    {id = "ward_2", after = {"ward_2_begin"}, run = function(context)
+        activate_hero(context, "ward_2")
+    end, await = flow.fact("scene.ward_2.ready")},
+    {id = "ward_2_entry", after = {"ward_2"}, run = function(context)
+        hero_entry(context, "ward_2")
+        wait(context, "ward_2_held", plaza.ward_ms)
+    end, await = waited("ward_2_held")},
+    -- W8-W10: the strike that kills Zavala.
+    {id = "strike_begin", after = {"ward_2_entry"}, run = function(context)
+        set_active(context, {plaza.bubble_shield}, false)
+        set_active(context, {plaza.rocket, plaza.missile_spawner}, true)
+        stop_hero(context, "ward_2")
+        wait(context, "death_stagger", plaza.stagger_ms)
+    end, await = waited("death_stagger")},
+    {id = "death", after = {"strike_begin"}, run = function(context)
+        activate_hero(context, "death")
+    end, await = flow.fact("scene.death.ready")},
+    {id = "death_entry", after = {"death"}, run = function(context)
+        hero_entry(context, "death")
+        wait(context, "strike", plaza.strike_ms)
+    end, await = flow.any(flow.fact("rocket.gone"), waited("strike"))},
+    -- W11-W12: Zavala down. His actor retires; the dead-Zavala Ghost and the revive interaction go up.
+    {id = "zavala_down", after = {"death_entry"}, run = function(context, state)
+        talk:say(context, state, content.lines.zavala_down)
+        stop_hero(context, "death")
+        context:slot(plaza.zavala_cell):retire_actor{}
+        set_active(context, {plaza.rocket}, false)
+        set_active(context, {plaza.dead_ghost, plaza.dead_interact}, true)
+        open(context, plaza.dead_ghost_device)
+        context:slot(plaza.dead_interact):set_interactable_object{active = true, used = false, track_owner = true}
+        wait(context, "revive_fallback", plaza.revive_fallback_ms)
+        trace(context, "Zavala down; revive available")
+    end},
+    -- W13-W16: the revive.
+    {id = "revived", after = {"zavala_down"}, await = flow.any(flow.fact("revive.used"), waited("revive_fallback"))},
+    {id = "revival_begin", after = {"revived"}, run = function(context)
+        context:slot(plaza.dead_interact):set_interactable_object{active = false, used = true}
+        set_active(context, {plaza.dead_interact, plaza.dead_ghost}, false)
+        close(context, plaza.dead_ghost_device)
+        wait(context, "revival_stagger", plaza.stagger_ms)
+    end, await = waited("revival_stagger")},
+    {id = "revival", after = {"revival_begin"}, run = function(context)
+        activate_hero(context, "revival")
+    end, await = flow.fact("scene.revival.ready")},
+    {id = "revival_entry", after = {"revival"}, run = function(context)
+        hero_entry(context, "revival")
+        wait(context, "revival_fallback", plaza.revival_fallback_ms)
+    end},
+    {id = "zavala_alive", after = {"revival_entry"}, await = zavala_back},
+    {id = "zavala_alive_anim", after = {"zavala_alive"}, run = function(context)
+        wait(context, "revival_anim", plaza.revival_ms)
+    end},
+    {id = "revival_done", after = {"revival_entry"},
+        await = flow.any(waited("revival_anim"), waited("revival_fallback"))},
+    -- W17-W22: Zavala fights again; the last assault with every carrier.
+    {id = "combat_3_stop", after = {"revival_done"}, run = function(context)
+        stop_hero(context, "revival")
+        wait(context, "combat_3", plaza.stagger_ms)
+    end, await = waited("combat_3")},
+    {id = "last_assault", after = {"combat_3_stop"}, run = function(context, state)
+        activate_hero(context, "combat_3")
+        talk:say(context, state, content.lines.last_assault)
+        place_wave(context, plaza.last)
+        set_active(context, plaza.carriers_last.objects, true)
+        open_all(context, plaza.carriers_last.devices)
+    end},
+    -- W23-W25: the plaza is held.
+    {id = "last_down", after = {"last_assault"}, await = down(plaza.last_clear)},
+    {id = "last_settle", after = {"last_down"}, run = function(context)
+        context:start_timer(settle_timer("plaza_last"), SETTLE_MS)
+    end, await = flow.fact("settled.plaza_last")},
+    {id = "plaza_held", after = {"last_settle"}, run = function(context, state)
+        assaults(context, 3)
+        stop_hero(context, "combat_3")
+        set_active(context, {plaza.orb_spawner}, false)
+        talk:say(context, state, content.lines.held)
+        show(context, plaza.goals.leave)
+        arm(context, plaza.triggers.goto_boulevard)
+    end},
+    -- W26-W27: leaving for the boulevard.
+    {id = "leave_plaza", after = {"plaza_held"}, await = pt("goto_boulevard")},
+    {id = "plaza_done", after = {"leave_plaza"}, run = function(context, state)
+        music(context, state, content.music.leaving_plaza)
+        trace(context, "plaza complete; the boulevard is not scripted yet")
+    end},
+}}
+
 -- ---- intro -------------------------------------------------------------------------------------
 
 -- The client holds the cutscene region, so only its start is owed. The spawn is held through the
@@ -509,14 +837,14 @@ end
 
 -- ---- event plumbing ----------------------------------------------------------------------------
 
+local graphs = {graph, graph_b, graph_c, graph_d}
+
 local function handle(context, state, event)
-    graph:handle(context, state, event)
-    graph_b:handle(context, state, event)
+    for _, g in ipairs(graphs) do g:handle(context, state, event) end
 end
 
 local function advance(context, state)
-    graph:advance(context, state)
-    graph_b:advance(context, state)
+    for _, g in ipairs(graphs) do g:advance(context, state) end
 end
 
 local function player_trigger(context, state, event)
@@ -547,8 +875,9 @@ end
 
 local function effect_result(context, state, event)
     if event.request_key == nil then return end
-    if hero_activation_result(context, state, event, content.hero_order) then return end
-    hero_activation_result(context, state, event, content.hero_order_b)
+    for _, order in ipairs({content.hero_order, content.hero_order_b, content.hero_order_c, content.hero_order_d}) do
+        if hero_activation_result(context, state, event, order) then return end
+    end
 end
 
 local function scene_finished(context, state, event)
@@ -590,7 +919,8 @@ return {
     on_event_player_trigger = player_trigger,
     on_event_effect_result = effect_result,
     on_event_timer_elapsed = function(context, state, event)
-        if talk:handle_timer(context, state, event) then return end
+        -- A finished line can release a step that waits on dialogue (the plaza's ship, its Ward).
+        if talk:handle_timer(context, state, event) then advance(context, state) return end
         if lib.orbit_return_elapsed(context, event) then return end
         handle(context, state, event)
     end,
