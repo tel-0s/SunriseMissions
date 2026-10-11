@@ -231,6 +231,9 @@ graph = flow.new{key = "homecoming", facts = facts, steps = {
     end},
     {id = "hero_moment", after = {"landing"}, await = pt("hero_moment")},
     {id = "hero_moment_scene", after = {"hero_moment"}, run = function(context)
+        for _, squad in ipairs(content.hero_moment_reserve) do
+            context:squad(squad):place{mode = context.sdk.squad_modes.reserve}
+        end
         context:scene(content.hero_moment):activate{spawn = true}
     end},
 
@@ -253,13 +256,16 @@ graph = flow.new{key = "homecoming", facts = facts, steps = {
         context:activate_objects{slots = {content.shaxx_blocker}, active = false}
         activate_hero(context, "shaxx")
     end},
-    -- U13: music changes when Cayde's scene is done. Only the music waits for it.
-    {id = "cayde_done", after = {"cayde_entry"}, await = cayde_finished},
+    -- U13: music changes when Cayde's scene is done. Sunrise delivered no scene_finished at all in
+    -- playtest 2, so reaching Shaxx also counts; only the music waits on this.
+    {id = "cayde_done", after = {"cayde_entry"},
+        await = flow.any(cayde_finished, pt("start_shaxx"), pt("near_shaxx"))},
     {id = "after_cayde", after = {"cayde_done"}, run = function(context, state)
         music(context, state, content.music.after_cayde)
     end},
-    -- U14: Shaxx sends the player to gear up. Never wait on Shaxx's scene finishing.
-    {id = "shaxx_near", after = {"after_cayde"},
+    -- U14: Shaxx sends the player to gear up once Cayde's scene has started and the player is near.
+    -- Never wait on Shaxx's (or Cayde's) scene finishing.
+    {id = "shaxx_near", after = {"cayde_entry"},
         await = flow.all(flow.any(pt("start_shaxx"), pt("near_shaxx")), flow.fact("scene.shaxx.ready"))},
     {id = "shaxx", after = {"shaxx_near"}, run = function(context)
         hero_entry(context, "shaxx")

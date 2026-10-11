@@ -120,6 +120,9 @@ return function(mission)
         scene("SC_CIVILIAN_RUN_FRONT_B_C"),                             -- 61
     }
     c.hero_moment = scene("SC_HERO_MOMENT_UNDERWATCH")                  -- 64
+    -- Its cast has no actor cells (omitted=3 in playtest 2), so it is reserved first.
+    c.hero_moment_reserve = squads("SQ_CABAL_HERO_MOMENT", "SQ_CABAL_HERO_MOMENT_B",
+        "SQ_CIVILIAN_HERO_MOMENT")                                      -- 65, 66, 67
 
     -- Hero scenes. Entry events are the scenes' own keys.
     -- activate{spawn=true} casts only squads that have an actor cell (a type-2 slot) in the scene's
@@ -135,12 +138,13 @@ return function(mission)
             reserve = squads("SQUAD_FIRST_CONTACT_CABAL", "SQ_FRAME_DIE"),                      -- 6, 7
             objectives = {{source = slot("SQUAD_FIRST_CONTACT_CABAL"), objective = slot("OBJ_CABAL_FIRST_CONTACT")}},
         },
+        -- No combat objective on SQ_CENTURION_INTRO: it is cast through its cell, and a cast source
+        -- that already runs an objective program makes the scene refuse (playtest 2).
         centurion = {
             scene = scene("SC_CENTURION_INTRO"), slot = slot("SC_CENTURION_INTRO"), -- 18
             entry = 0x6F51AC66,
             bind = slots("SQ_CENTURION_INTRO_CELL_1"),                                          -- 21
             reserve = squads("SQ_FRAME"),                                                       -- 24
-            objectives = {{source = slot("SQ_CENTURION_INTRO"), objective = slot("OBJ_CENTURION_INTRO")}},
         },
         cayde = {
             scene = scene("SCENE_CAYDE_GOLDEN_GUN"), slot = slot("SCENE_CAYDE_GOLDEN_GUN"), -- 17
